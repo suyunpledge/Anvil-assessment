@@ -242,8 +242,8 @@ class Budget:
 
 
 def render(kept: List[Dict[str, Any]]) -> str:
-    order = ["task", "target_source", "file_head", "neighbors", "references",
-             "repo_map", "notes", "semantic"]
+    order = ["task", "hr_memory", "target_source", "file_head", "neighbors",
+             "references", "repo_map", "notes", "semantic"]
     kept = sorted(kept, key=lambda s: order.index(s["key"]) if s["key"] in order else 99)
     parts = []
     for s in kept:
@@ -300,6 +300,22 @@ def build(target: str, task: str, spec: Any, workdir: str = "",
     rm = repo_map(workdir, max_files=repo_map_files)
     b.add("repo_map", 30, rm["text"])
 
+    # ★ 考核接入件（2026-10-17）：HR 分级检索注入。
+    #   纪律一：绝不阻断——HR 挂了/关了就是没有这一段，工单照常跑；
+    #   纪律二：进预算——检索文本是普通 section，优先级低于代码本体（55 < 90），
+    #           预算紧张时先被扔，绝不挤占目标源码的位置；
+    #   纪律三：可对照——ANVIL_HR=0 关掉即回对照组，方便考核演示 A/B。
+    hr_text = ""
+    try:
+        from hr_bridge import enabled as _hr_on, retrieve as _hr_get
+        if _hr_on():
+            hr = _hr_get(task, target_rel, log_tag="build")
+            hr_text = str(hr.get("text") or "")
+            if hr_text:
+                b.add("hr_memory", 55, hr_text)
+    except Exception:
+        hr_text = ""
+
     fitted = b.fit()
     text = render(fitted["kept"])
     return {
@@ -308,6 +324,7 @@ def build(target: str, task: str, spec: Any, workdir: str = "",
         "tokens_est": est_tokens(text), "limit_tokens": b.limit,
         "ctx_max": ctx_max, "kept": [k["key"] for k in fitted["kept"]],
         "dropped": fitted["dropped"], "chunks": len(chunks),
+        "hr_enabled": bool(hr_text),
         "repo_map_files": len(rm["entries"]), "repo_map_truncated": rm["truncated"],
         "naive_tokens_full_file": est_tokens(_read(target_abs)),
     }

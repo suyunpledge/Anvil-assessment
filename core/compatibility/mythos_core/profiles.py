@@ -232,6 +232,43 @@ for _k, _label, _model, _think, _ctx, _note in _VERIFIED_2026_09_28:
     )
     PROFILE_BY_MODEL[_model] = _k
 
+# ============================================================
+# Qwen3.5-9B —— 2026-10-17 补做（考核版主力模型）
+#   依据（2026-10-17 冒烟 smoke_qwen35.py，三项全过）：
+#   · think=true 被接受（thinking 长度 557，正文正常回答"2"）→ sends_think=True；
+#   · 原生 tool_calls 通道：带 tools 时稳定发起 apply_patch 调用，
+#     old_string 逐字含缩进、参数结构完全正确（无正文 JSON 抠取需求）；
+#   · ctx 262144（Ollama model_info qwen35.context_length）。
+#   与 qwen2.5-coder 的差别：无需行号防呆提示，补丁写法一次到位。
+# ============================================================
+QWEN35 = ModelProfile(
+    key="qwen3.5",
+    label="Qwen3.5-9B",
+    model="qwen3.5:9b",
+    toolsets=dict(TOOLSETS),
+    ctx_policy=dict(CTX_POLICY),
+    ctx_default=CTX_DEFAULT,
+    ctx_max=262144,
+    ctx_interactive_max=min(CTX_INTERACTIVE_MAX, 262144),
+    temp_ladder=list(TEMP_LADDER),
+    sends_think=True,
+    extract_from_content=False,
+    # ★ edit 关思考的依据（2026-10-17 e2e 暴露 + T4 实测）：
+    #   e2e 首跑 edit 节点 think=True 单轮 141s（9b 模型显存溢出 CPU，思考链长）；
+    #   T4 对照 think=False：14.4s，apply_patch 参数逐字正确（old_string 精准）。
+    #   Mythos 画像的 E15（edit 必须开思考）在它身上不成立——原生 tool_calls 模型
+    #   的补丁质量不靠思考链撑。recon 保留 slot 关思考（NODE_KIND 默认即关）。
+    think_policy={**dict(THINK_POLICY), "edit": False},
+    notes="考核版主力：原生工具通道；think 键可发但 edit 关（实测 141s→14s，质量不降）。",
+    evidence=("2026-10-17 T1 think=true OK（thinking=557）",
+              "2026-10-17 T2 原生 tool_calls，apply_patch 参数逐字正确",
+              "2026-10-17 T3 qwen35.context_length=262144",
+              "2026-10-17 T4 think=False edit 14.4s 参数正确（对照 think=True 141s）"),
+)
+ALL_PROFILES[QWEN35.key] = QWEN35
+PROFILE_BY_MODEL[QWEN35.model] = QWEN35.key
+
+
 #: 本机「声明支持 tools 但实测不可用」的模型：不要选作工具节点，除非先做适配层
 UNUSABLE_TOOL_MODELS: Dict[str, str] = {
     "glm4:9b": "声明 tools 但完全不发 tool_calls（只说“我无法访问文件”）；且只接受 think=false",

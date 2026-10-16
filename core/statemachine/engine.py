@@ -150,6 +150,9 @@ class WorkOrderStateMachine:
         self._test_hook_before_commit = _test_hook_before_commit
         self.events: List[str] = []
         self.staging = ""
+        #: ★ 考核接入件（2026-10-17）：本单是否启用视觉工具（工单级，绝不进程级污染）
+        self._visual_ok: bool = False
+        self._visual_installed: bool = False
         self._violations_in_node: Dict[str, int] = {}
         self._escalated_for: Dict[str, bool] = {}
         self._failure_sigs: Dict[str, int] = {}
@@ -236,12 +239,50 @@ class WorkOrderStateMachine:
                            write_scope=self.wo.budget("write_scope", "target_only"),
                            timeout_sec=int(self.wo.constraints.get("timeout_sec", 180)))
 
+    def _enable_visual_tools(self) -> None:
+        """★ 考核接入件（2026-10-17）：按工单开关装载 SVSG 视觉工具（v2，无进程级污染）。
+
+        授权走两层，都只影响本单：
+          1. 引擎层：本实例 _visual_ok=True → _execute_call 的授权集合放开 visual_query；
+          2. 适配器层：ad.profile["node_toolsets"]["recon"/"edit"] 追加 visual_query，
+             让模型**看得见**这个工具（tools_for 会先查这个覆盖再落画像默认）。
+        不动全局 NODE_TOOLSETS / 画像类字段——service 进程里下一个纯代码工单
+        的工具面与之前完全一致（v1 教训：模块级突变=进程级污染）。
+        """
+        if not self.wo.budget("visual_tasks", False):
+            return
+        try:
+            sys.path.insert(0, os.path.join(_PROJECT, "context"))
+            from visual_tools import install_visual_tools
+            if not self._visual_installed:
+                install_visual_tools()   # 幂等：REGISTRY/EXECUTORS 全局只装一次（工具本体无状态）
+                self._visual_installed = True
+            self._visual_ok = True
+            self._log("视觉工具已装载（visual_query，工单级授权）")
+        except Exception as e:
+            self._log("视觉工具装载失败（不影响工单）：%s" % e)
+            return
+        # 适配器实例级覆盖：让模型在本单的 recon/edit 里看得见 visual_query
+        try:
+            prof = getattr(self.ad, "profile", None)
+            if isinstance(prof, dict):
+                ovr = prof.setdefault("node_toolsets", {})
+                for node in ("recon", "edit"):
+                    lst = list(ovr.get(node) or self.ad.spec.tools_for_key(node))
+                    if "visual_query" not in lst:
+                        lst.append("visual_query")
+                    ovr[node] = lst
+        except Exception as e:
+            self._log("视觉工具适配器覆盖失败（模型看不到 visual_query）：%s" % e)
+
     # ---------------- 引擎级工具执行（第二道闸） ----------------
     def _execute_call(self, ctx: ToolContext, call: Dict[str, Any], node: str,
                       turn: int) -> Dict[str, Any]:
         name = str(call.get("name") or "")
         args = call.get("args") or {}
         allowed = set(NODE_TOOLSETS.get(node, []))
+        if self._visual_ok and name == "visual_query" and node in ("recon", "edit"):
+            allowed.add("visual_query")   # 工单级授权：只放本单、只放这两个节点
         if name not in allowed:
             self.wo.add_violation(node, "R1", "未授权工具：%s（本节点只允许 %s）"
                                   % (name, sorted(allowed)))
@@ -573,6 +614,7 @@ class WorkOrderStateMachine:
         t0 = time.time()
         try:
             self._stage()
+            self._enable_visual_tools()
             ctx = self._ctx()
             recon = self._node_recon(ctx)
             feedback = ""
