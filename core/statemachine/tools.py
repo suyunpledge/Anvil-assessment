@@ -167,7 +167,12 @@ def read_file(ctx: ToolContext, path: str = "", max_lines: int = 400,
         head = "[%s 共 %d 行%s]" % (path, total, "，已截取前 %d 行" % m if truncated else "")
     return {"path": path, "total_lines": total, "text": head + "\n" + "\n".join(chunk),
             "truncated": truncated,
-            "version": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()}
+            # ★ 版本口径统一（2026-10-17 实测抓 bug）：必须用 content_version 的
+            #   **原始字节**哈希，与 apply_patch / 引擎基线同一真相源。原来按
+            #   「文本读入再 encode」算——universal newlines 把 CRLF 归一成 LF，
+            #   导致所有 CRLF 文件 read 版本 ≠ 落盘校验版本，第一次写必撞
+            #   VersionConflict（乐观并发误拒，3 轮烧完变 needs_input）。
+            "version": content_version(p)}
 
 
 def list_dir(ctx: ToolContext, path: str = ".", depth: int = 1) -> Dict[str, Any]:

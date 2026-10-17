@@ -125,6 +125,7 @@ class RunnerOpts:
     max_repair_rounds: int = 3
     allow_delete: bool = False             # ★ tidy：开启删除（会强制人确认 + 自动备份）
     require_confirm: bool = True           # ★ 落盘必须经人确认
+    visual_tasks: bool = False             # ★ code：装载 visual_query（工单级，默认不暴露）
     wo_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -268,6 +269,8 @@ class WorkOrderRunner:
                        target=self.opts.target,
                        test_path=self.opts.test_path or None)
         wo.constraints["max_repair_rounds"] = int(self.opts.max_repair_rounds)
+        # 考核接入（2026-10-17）：视觉工单开关透传（引擎按它装载 visual_query）
+        wo.constraints["visual_tasks"] = bool(self.opts.visual_tasks)
         # ★ 外部审查 #6：把上下文层接进真实工单链。
         #   注意它工作在**暂存区**（src 是 staging 目录），所以要拿 staging 路径。
         def _ctx_provider(task: str, target: str):

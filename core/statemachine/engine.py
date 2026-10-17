@@ -252,7 +252,13 @@ class WorkOrderStateMachine:
         if not self.wo.budget("visual_tasks", False):
             return
         try:
-            sys.path.insert(0, os.path.join(_PROJECT, "context"))
+            # ★ 路径修正（2026-10-17 实测抓 bug）：visual_tools 在**仓库根**的 context/
+            #   下，而 _PROJECT 是 core/（engine 的父目录）——os.path.join(_PROJECT,
+            #   "context") 指向不存在的 core/context，import 必炸且被 except 静默吞掉，
+            #   表现为「工单正常跑完但模型从没见过 visual_query」。
+            _ctx_dir = os.path.dirname(_PROJECT) if os.path.basename(_PROJECT) == "core" else _PROJECT
+            _ctx_dir = os.path.join(_ctx_dir, "context")
+            sys.path.insert(0, _ctx_dir)
             from visual_tools import install_visual_tools
             if not self._visual_installed:
                 install_visual_tools()   # 幂等：REGISTRY/EXECUTORS 全局只装一次（工具本体无状态）
@@ -314,8 +320,15 @@ class WorkOrderStateMachine:
         if name in WRITE_TOOLS:
             rel = str(args.get("path") or self.wo.target)
             iv = self._seen_version.get(rel)
-            if iv and not args.get("expected_version"):
+            # ★ 考核加固（2026-10-17 实测 qwen3.5 暴露）：模型会幻觉 expected_version
+            #   （自己编一个 sha256 传上来），与框架记录不符 → 乐观并发连续误拒，
+            #   3 轮预算烧光变 needs_input。版本号的唯一真相源是框架的 _seen_version
+            #   （模型每次 read 后框架自己记的），模型传的值一律覆盖：
+            #   框架有记录 → 用框架的；没有 → 清空模型幻觉值（无条件写）。
+            if iv:
                 args["expected_version"] = iv
+            else:
+                args.pop("expected_version", None)
 
         res = execute(ctx, name, args)
         ctx.note(name, args, True)
@@ -375,6 +388,17 @@ class WorkOrderStateMachine:
             "6) 改动不能留下不可达代码：旧实现要真删掉，而不是把它留在 return 后面。"
             % (target, target)
         )
+        # ★ 视觉工单特别说明（2026-10-17 实测教训）：模型会把 visual_query 当成
+        #   Python 函数直接写进代码（result = visual_query(...)）——它是**对话工具**，
+        #   只能在回复里以工具调用形式使用，代码里不存在这个函数。
+        if self._visual_ok:
+            text += (
+                "\n★ 视觉工具使用纪律：visual_query 是你（编辑节点）可用的**对话工具**，"
+                "不是 Python 库函数。想看图就在回复里发起 visual_query 工具调用"
+                "（与 apply_patch 同样的调用方式）；**绝不能把 visual_query 写进代码**"
+                "——那会直接导致类型 gate 失败。写进目标文件的代码必须是纯 Python 逻辑"
+                "（例如按文件名/扩展名等已有信息分类）。"
+            )
         return text + (("\n" + hint) if hint else "")
 
     def _user_recon(self, ctx: ToolContext) -> str:

@@ -177,6 +177,8 @@ if _FASTAPI_OK:
         # tidy 专用：开启删除（服务端会强制人确认，且执行时自动备份）
         allow_delete: bool = False
         require_confirm: bool = True
+        # code 专用：视觉工单（装载 visual_query，工单级授权）
+        visual_tasks: bool = False
 else:
     class CreateReq:                       # type: ignore
         pass
