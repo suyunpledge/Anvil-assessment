@@ -277,8 +277,10 @@ class Panel {
   <div><label>适配层</label><input id="adapter" value="${this.esc(c.adapter)}"></div>
 </div>
 <label><input type="checkbox" id="semantic" style="width:auto"> tidy 用本地嵌入给内容归类建议</label>
+<label><input type="checkbox" id="visual" style="width:auto"> code 视觉工单（装载 visual_query，模型可看沙箱内图片）</label>
 <button id="go">建单并运行</button>
 <button class="ghost" id="check">检查服务</button>
+<button class="ghost" id="integ">模块就绪</button>
 
 ${
   awaiting
@@ -310,7 +312,8 @@ ${
           test: document.getElementById('test').value,
           dirs: document.getElementById('dirs').value,
           adapter: document.getElementById('adapter').value,
-          semantic: document.getElementById('semantic').checked
+          semantic: document.getElementById('semantic').checked,
+          visual: !!(document.getElementById('visual') && document.getElementById('visual').checked)
         });
       } else send(kind);
     });
@@ -328,6 +331,7 @@ ${
     if (m.kind === 'confirm') return Commands.confirmApply();
     if (m.kind === 'cancel') return Commands.cancelOrder();
     if (m.kind === 'audit') return Commands.showAudit();
+      if (m.kind === 'integ') return Commands.showIntegrations();
   }
 
   // ---- 事件接入 ----
@@ -403,6 +407,7 @@ const Commands = {
         target: m.target || '',
         test_path: m.test || '',
         adapter: m.adapter || adapter,
+        visual_tasks: !!m.visual,
         require_confirm: !cfg().autoApply
       };
       if (!body.target) return vscode.window.showWarningMessage('code 工单需要目标文件');
@@ -417,6 +422,47 @@ const Commands = {
     } catch (e) {
       vscode.window.showErrorMessage(`连不上工单服务（${service}）：${e.message}`);
     }
+  },
+
+  async showIntegrations() {
+    const { service } = cfg();
+    try {
+      const r = await authed(`${service}/integrations`, { timeout: 15000 });
+      if (r.status !== 200 || !r.json) {
+        return vscode.window.showErrorMessage(`集成状态查询失败：${r.status}`);
+      }
+      const d = r.json;
+      const lines = [
+        `整体就绪：${d.ok ? '✓' : '✗'}（模式 ${d.mode}）`,
+        `代码模型 ${d.models.code.name}：${d.models.code.ready ? '✓' : '✗'}`,
+        `视觉模型 ${d.models.vision.name}：${d.models.vision.ready ? '✓' : '✗'}`,
+        `嵌入模型 ${d.models.embedding.name}：${d.models.embedding.ready ? '✓' : '✗'}`,
+        `记忆：${d.memory} ｜ 视觉复核：${d.visual_verifier}`
+      ];
+      PanelSingleton.push(lines.join('\n'));
+      vscode.window.showInformationMessage(d.ok ? '三模块全部就绪 ✓' : '有模块未就绪，详见面板日志');
+    } catch (e) {
+      vscode.window.showErrorMessage(`连不上服务（${service}）：${e.message}`);
+    }
+  },
+
+  async newWorkOrderForFile(uri) {
+    // 右键资源管理器/编辑器：目标文件预填
+    const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+    if (!folder) return vscode.window.showWarningMessage('请先打开一个文件夹作为工作目录');
+    const rel = path.relative(folder.uri.fsPath, uri.fsPath || uri.path).split(path.sep).join('/');
+    const task = await vscode.window.showInputBox({
+      prompt: `对 ${rel} 的任务描述（实现/修改什么）`,
+      placeHolder: '例：实现 average(nums)：返回平均值，空列表返回 0.0'
+    });
+    if (!task) return;
+    const test = (await vscode.window.showInputBox({
+      prompt: '测试文件（可留空）',
+      value: rel.replace(/\.py$/, '').startsWith('test_')
+        ? rel
+        : `test_${path.basename(rel)}`
+    })) || '';
+    return Commands.run({ woKind: 'code', task, target: rel, test, adapter: cfg().adapter });
   },
 
   async check() {
@@ -587,7 +633,9 @@ function activate(context) {
     ['localIde.confirmApply', Commands.confirmApply],
     ['localIde.cancelOrder', Commands.cancelOrder],
     ['localIde.showAudit', Commands.showAudit],
-    ['localIde.checkServices', Commands.check]
+    ['localIde.checkServices', Commands.check],
+    ['localIde.showIntegrations', Commands.showIntegrations],
+    ['localIde.newWorkOrderForFile', Commands.newWorkOrderForFile]
   ]) {
     context.subscriptions.push(vscode.commands.registerCommand(id, fn));
   }

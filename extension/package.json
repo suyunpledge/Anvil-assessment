@@ -56,6 +56,16 @@
         "command": "localIde.checkServices",
         "title": "Local IDE: 检查本地服务",
         "category": "Local IDE"
+      },
+      {
+        "command": "localIde.newWorkOrderForFile",
+        "title": "Local IDE: 对此文件建工单",
+        "category": "Local IDE"
+      },
+      {
+        "command": "localIde.showIntegrations",
+        "title": "Local IDE: 三模块就绪状态",
+        "category": "Local IDE"
       }
     ],
     "configuration": {
@@ -73,8 +83,8 @@
         },
         "localIde.defaultAdapter": {
           "type": "string",
-          "default": "mythos",
-          "description": "默认适配层（见 /presets 返回的画像清单）"
+          "default": "qwen3.5",
+          "description": "默认适配层（qwen3.5 = 考核主力；完整清单见 /presets）"
         },
         "localIde.autoApply": {
           "type": "boolean",
@@ -111,6 +121,30 @@
         {
           "command": "localIde.explainSelection",
           "when": "editorHasSelection",
+          "group": "localIde@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "localIde.newWorkOrderForFile",
+          "when": "resourceLangId == python",
+          "group": "localIde@1"
+        },
+        {
+          "command": "localIde.newWorkOrderForFile",
+          "when": "resourceLangId == python",
+          "group": "localIde@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "localIde.newWorkOrderForFile",
+          "when": "resourceLangId == python",
+          "group": "localIde@1"
+        },
+        {
+          "command": "localIde.newWorkOrderForFile",
+          "when": "resourceLangId == python",
           "group": "localIde@1"
         }
       ]
