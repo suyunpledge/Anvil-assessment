@@ -18,7 +18,8 @@ import zipfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 
-SKIP_DIRS = {"__pycache__", ".runtime", ".sm-work", ".sm-runs", ".git", "node_modules"}
+SKIP_DIRS = {"__pycache__", ".runtime", ".sm-work", ".sm-runs", ".git", "node_modules",
+             ".venv", "venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 SKIP_EXT = {".pyc", ".pyo"}
 
 #: 已知的**运行时可変状态**：运行测试/工单会让它们变化。
@@ -34,6 +35,8 @@ def iter_files(root: str):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in sorted(filenames):
+            if name == ".env" or name.startswith(".env.") or name.endswith((".bak", ".tmp")):
+                continue
             if os.path.splitext(name)[1].lower() in SKIP_EXT:
                 continue
             full = os.path.join(dirpath, name)

@@ -24,7 +24,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -102,7 +102,7 @@ class ConfirmPolicy:
 
     def __init__(self, force_confirm: bool, allowed_roots: List[str], require_token: bool) -> None:
         self.force_confirm = force_confirm
-        self.allowed_roots = [os.path.abspath(r) for r in allowed_roots if r]
+        self.allowed_roots = [os.path.normcase(os.path.realpath(r.strip())) for r in allowed_roots if r.strip()]
         self.require_token = require_token
 
     @classmethod
@@ -126,7 +126,7 @@ class ConfirmPolicy:
     def workdir_allowed(self, path: str) -> bool:
         if not self.allowed_roots:
             return True
-        p = os.path.abspath(path or "")
+        p = os.path.normcase(os.path.realpath(path or ""))
         for root in self.allowed_roots:
             if p == root or p.startswith(root + os.sep):
                 return True
@@ -161,19 +161,22 @@ def _write_token_file(token: str) -> None:
 
 
 if _FASTAPI_OK:
+    class ConfirmReq(BaseModel):
+        approve: bool = True
+
     class CreateReq(BaseModel):
         """建单请求。字段名与 RunnerOpts 对齐（少传就有默认值）。"""
-        kind: str = Field(default="code", description="code | tidy")
+        kind: Literal["code", "tidy"] = "code"
         task: str = ""
         workdir: str = ""
         target: str = ""
         test_path: str = ""
-        adapter: str = "mythos"
+        adapter: str = "qwen3.5"
         model: str = ""
-        mode: str = "dry_run"
+        mode: Literal["dry_run", "execute"] = "dry_run"
         dirs: List[str] = Field(default_factory=list)
         semantic: bool = False
-        max_repair_rounds: int = 3
+        max_repair_rounds: int = Field(default=3, ge=0, le=8)
         # tidy 专用：开启删除（服务端会强制人确认，且执行时自动备份）
         allow_delete: bool = False
         require_confirm: bool = True
@@ -286,10 +289,12 @@ def build_app():
         return {"ok": r.cancel(), "status": r.status}
 
     @app.post("/wo/{wo_id}/confirm", dependencies=[READ_AUTH])
-    def confirm(wo_id: str):
+    def confirm(wo_id: str, req: Optional[ConfirmReq] = None):
         r = REGISTRY.get(wo_id)
         if not r:
             return JSONResponse(status_code=404, content={"error": "工单不存在"})
+        if req is not None and not req.approve:
+            return {"ok": r.cancel(), "status": r.status}
         res = r.confirm()
         return JSONResponse(status_code=(200 if res.get("ok") else 409), content=res)
 

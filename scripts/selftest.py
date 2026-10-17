@@ -24,6 +24,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 
 SUITES = [
+    ("原生集成与故障回归", ["integration/tests/test_integration.py"]),
     ("网关单测", ["gateway/tests/test_gateway.py"]),
     ("网关鉴权（1005 补齐）", ["gateway/tests/test_gateway_auth.py"]),
     ("上下文层单测", ["context/tests/test_context.py"]),
@@ -88,6 +89,8 @@ def run_node(rel: str) -> tuple:
 
 
 def main(argv=None) -> int:
+    # 离线回归必须隔离真实嵌入调用；原生链路由 integration/tests 单独验证。
+    os.environ["ANVIL_HR"] = "0"
     ap = argparse.ArgumentParser(description="本地 IDE 离线自检")
     ap.add_argument("--core", action="store_true", help="一并跑核心回归")
     args = ap.parse_args(argv)
@@ -114,7 +117,7 @@ def main(argv=None) -> int:
     for name, _, summary in bad:
         print("  ✗ %s  %s" % (name, summary))
     if not bad:
-        print("\n下一步：python scripts/e2e_check.py   （端到端，需要本地模型）")
+        print("\n下一步：python scripts/integration_e2e.py （原生集成，需要本地模型）")
     return 0 if not bad else 1
 
 

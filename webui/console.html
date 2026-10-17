@@ -129,6 +129,7 @@ footer code { font-family: var(--mono); color: var(--acc); }
     <button class="ghost" onclick="fillDemo('hr')">演示③：带项目记忆（HR）</button>
   </div>
 
+  <div id="integrationStatus" class="sub" style="margin-bottom:16px">模块状态待检查</div>
   <div class="grid">
     <!-- 左列：建单 + 工单列表 -->
     <div style="display:flex; flex-direction:column; gap:18px;">
@@ -192,8 +193,8 @@ footer code { font-family: var(--mono); color: var(--acc); }
   </div>
 
   <footer>
-    服务地址 <code id="svcUrl">http://127.0.0.1:8099</code> · 令牌读 <code>runtime/service-token</code> ·
-    全链只连本机（Ollama 11434 / HR 8001 / SVSG 3002）
+    服务地址 <code id="svcUrl">http://127.0.0.1:8099</code> · 令牌读 <code>.runtime/service-token</code> ·
+    工单 / HR 记忆 / SVSG 视觉同进程运行 · Ollama 11434
   </footer>
 </div>
 
@@ -205,14 +206,18 @@ let CFG = loadCfg();
 function loadCfg() {
   try { return JSON.parse(localStorage.getItem(CFG_KEY) || "{}"); } catch { return {}; }
 }
-function saveCfg() { localStorage.setItem(CFG_KEY, JSON.stringify(CFG)); }
+function saveCfg() { localStorage.setItem(CFG_KEY, JSON.stringify({ ...CFG, token: undefined })); }
+CFG.token = sessionStorage.getItem("anvil_token") || CFG.token || "";
+if (location.protocol === "http:" || location.protocol === "https:") CFG.svc = location.origin;
 
 // ============ API 封装 ============
 let TOKEN = "";
 async function api(method, path, body) {
   const headers = { "Content-Type": "application/json" };
   if (TOKEN) headers["X-Local-Ide-Token"] = TOKEN;
-  const r = await fetch(CFG.svc + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  let r;
+  try { r = await fetch(CFG.svc + path, { method, headers, body: body ? JSON.stringify(body) : undefined }); }
+  catch (e) { return { code: 0, data: { error: String(e) } }; }
   let data = null;
   try { data = await r.json(); } catch {}
   return { code: r.status, data };
@@ -228,9 +233,17 @@ async function connect() {
     return false;
   }
   TOKEN = CFG.token;
-  const { code, data } = await api("GET", "/health");
+  const { code, data } = await api("GET", "/wo");
   if (code === 200 && data) {
-    dot.className = "ok"; txt.textContent = "已连接 " + (data.version || "");
+    dot.className = "ok"; txt.textContent = "已连接";
+    const state = await api("GET", "/integrations");
+    if (state.code === 200) {
+      const s = state.data;
+      document.getElementById("integrationStatus").textContent =
+        `原生集成 · 记忆按项目隔离 · 代码模型 ${s.models.code.ready ? "就绪" : "缺失"} · 视觉模型 ${s.models.vision.ready ? "就绪" : "缺失"} · 嵌入模型 ${s.models.embedding.ready ? "就绪" : "缺失"} · 检测权重 ${s.vision_weights ? "就绪" : "缺失"}`;
+    }
+    const demo = await api("GET", "/demo/config");
+    if (demo.code === 200) Object.values(DEMOS).forEach(d => { d.workdir = demo.data.workdir; });
     return true;
   }
   dot.className = ""; txt.textContent = "连接失败";
@@ -238,8 +251,8 @@ async function connect() {
 }
 
 function askToken() {
-  const t = prompt("粘贴服务令牌（service 启动目录下 runtime/service-token 文件内容）：", CFG.token || "");
-  if (t !== null) { CFG.token = t.trim(); saveCfg(); location.reload(); }
+  const t = prompt("粘贴 Anvil 目录下 .runtime/service-token 文件内容：", CFG.token || "");
+  if (t !== null) { CFG.token = t.trim(); sessionStorage.setItem("anvil_token", CFG.token); saveCfg(); location.reload(); }
 }
 document.getElementById("connTxt").addEventListener("click", askToken);
 document.getElementById("svcUrl").textContent = CFG.svc || "http://127.0.0.1:8099";
@@ -249,15 +262,15 @@ if (!CFG.svc) { CFG.svc = "http://127.0.0.1:8099"; saveCfg(); }
 const DEMOS = {
   code: {
     task: "在 calc.py 中实现 average(nums) 函数：返回整数列表的平均值，空列表返回 0.0。把 average 现有的函数体替换掉（不要留下旧代码）；确保测试全部通过。",
-    workdir: "C:\\anvil-demo", target: "calc.py", test: "test_calc.py", visual: false,
+    workdir: "", target: "calc.py", test: "test_calc.py", visual: false,
   },
   visual: {
-    task: "在 vision_classify.py 中实现 classify_image(path)：先调用 visual_query 工具查看 sample/bus.jpg 确认图片实际内容（硬性要求，不看图写出来的分类没有依据），然后按实际内容实现：公交/机动车场景返回 'vehicle'，其它返回 'other'。文件不存在等异常返回 'other'。确保测试全部通过。",
-    workdir: "C:\\anvil-demo-visual", target: "vision_classify.py", test: "test_vision_classify.py", visual: true,
+    task: "在 vision_classify.py 中实现 classify_image(path)：先在侦察阶段调用 visual_query 工具查看 sample/bus.jpg 确认图片实际内容（硬性要求，不看图写出来的分类没有依据），然后按侦察结论实现：视觉确认公交/机动车场景后，路径存在返回 'vehicle'，不存在或异常返回 'other'。注意：visual_query 只是侦察阶段的工具，交付代码中禁止 import 或调用它，用纯 Python 实现。确保测试全部通过。",
+    workdir: "", target: "vision_classify.py", test: "test_vision_classify.py", visual: true,
   },
   hr: {
-    task: "修改 tools.py 的 apply_patch：支持把补丁参数包在 patch 嵌套对象里的调用形态（有的模型会传 patch={old_string,new_string} 而不是扁平参数）。注意保持写范围约束与乐观并发语义不变。",
-    workdir: "C:\\Users\\匡溯昀\\Desktop\\本地工作流\\Anvil\\core\\statemachine", target: "tools.py", test: "", visual: false,
+    task: "把 calc.py 的 average 文档字符串替换为：返回列表的算术平均值，空列表结果固定为0.0。参考此前已确认的平均值记录，保持函数行为与类型注解不变，确保测试通过。",
+    workdir: "", target: "calc.py", test: "test_calc.py", visual: false,
   },
 };
 function fillDemo(kind) {
@@ -268,7 +281,7 @@ function fillDemo(kind) {
   document.getElementById("f_test").value = d.test;
   document.getElementById("f_visual").checked = d.visual;
   document.getElementById("f_adapter").value = "qwen3.5";
-  note(kind === "hr" ? "演示③说明：HR 会自动检索项目知识注入（需 HR 服务在 8001 在线）。演示前先用准备脚本造沙箱。" :
+  note(kind === "hr" ? "演示③说明：先确认演示①并等待记忆入库，再演示项目记忆召回。" :
         kind === "visual" ? "演示②说明：需先造视觉沙箱（bus.jpg + 待实现文件）。模型必须先看图才能写对。" :
         "演示①说明：需先造 calc 沙箱（calc.py + test_calc.py）。");
 }
@@ -353,7 +366,7 @@ async function renderDetail() {
   const patchesN = hist.some(h => h.kind === "tool" && h.tool === "apply_patch")
     ? hist.filter(h => h.tool === "apply_patch").length : 0;
   const woTask = data.task || r.task || "";
-  const woTarget = CFG.lastTarget || "";
+  const woTarget = data.target || "";
 
   let html = `
     <div class="d-sec">
@@ -364,7 +377,7 @@ async function renderDetail() {
       </div>
       <div class="kv">
         <div><b>目标</b><span>${esc(woTarget)}</span></div>
-        <div><b>模型</b><span>${esc(CFG.adapter || "qwen3.5")}</span></div>
+        <div><b>模型</b><span>${esc(data.model || data.adapter || "")}</span></div>
         <div><b>补丁数</b><span>${patchesN}</span></div>
         <div><b>visual_query</b><span>${hist.some(h => h.tool === "visual_query") ? "✓ 已调用" : "—"}</span></div>
       </div>
@@ -408,7 +421,14 @@ async function renderDetail() {
     html += `<div class="actions"><button class="danger" onclick="cancelWo()">取消工单</button>
       <span class="note">运行中，每 3s 自动刷新</span></div>`;
   }
+  html += `<div class="d-sec"><button class="ghost" onclick="showRecords()">查看本单接入记录</button><pre id="records" class="code" style="margin-top:8px;max-height:400px;overflow:auto"></pre></div>`;
+  if (data.error) html += `<div class="d-sec" style="color:var(--err)">${esc(data.error)}</div>`;
   body.innerHTML = html;
+}
+
+async function showRecords() {
+  const result = await api("GET", `/wo/${SEL}/records`);
+  document.getElementById("records").textContent = JSON.stringify(result.data, null, 2);
 }
 
 function colorDiff(diff) {
@@ -422,7 +442,7 @@ function colorDiff(diff) {
 
 async function confirmWo(ok) {
   if (!SEL) return;
-  const { code, data } = await api("POST", `/wo/${SEL}/confirm`, { approve: ok });
+  const { code, data } = await api("POST", `/wo/${SEL}/${ok ? "confirm" : "cancel"}`, {});
   alert(code === 200 && data.ok ? (ok ? "已落盘" : "已拒绝") : "操作失败：" + JSON.stringify(data));
   renderDetail(); refreshList();
 }

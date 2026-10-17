@@ -148,6 +148,23 @@ class FallbackTest(_Base):
         self.assertEqual(wo.gate_results[1]["signal"], "fail")
         self.assertIn("undefined_name", json.dumps(wo.gate_results[1], ensure_ascii=False))
 
+    def test_tool_name_leak_gets_explicit_hint(self) -> None:
+        """模型把对话工具名写进交付代码时，gate 反馈必须点名纠正（2026-10-17 真机暴露）。"""
+        leak = NEW_AVG_GOOD.replace("return sum(nums) / len(nums)",
+                                    "return sum(nums) / len(nums) if read_file else 0.0")
+        fixed = NEW_AVG_GOOD
+        sm, wo, ad = self.make_sm([nc("ok"),
+                                   tc(patch(OLD_AVG, leak)),
+                                   tc(patch("    return sum(nums) / len(nums) if read_file else 0.0",
+                                            "    return sum(nums) / len(nums)"))])
+        res = sm.run()
+        self.assertEqual(res.status, STATUS_DONE)
+        second_edit = ad.calls_for("edit")[1]["messages"]
+        text = json.dumps(second_edit, ensure_ascii=False)
+        self.assertIn("对话工具", text)
+        self.assertIn("read_file", text)
+        self.assertNotIn("if read_file", self.read())
+
     def test_test_gate_repeat_signature_escalates_to_recon(self) -> None:
         bad1 = patch(OLD_AVG, NEW_AVG_GOOD.replace("    if not nums:\n        return 0.0\n", "")
                      .replace("return sum(nums) / len(nums)", "return 1.0"))
@@ -159,7 +176,6 @@ class FallbackTest(_Base):
         self.assertEqual(wo.round_no, 2)
         self.assertEqual(ad.nodes().count("recon"), 2, "测试失败签名重复后应重新走读节点")
         self.assertIn("return sum(nums) / len(nums)", self.read())
-
     def test_repair_budget_exhausted_escalates(self) -> None:
         # 每轮都让补丁能应用、但始终留着语法错（逐级加符号），把修复轮用尽
         chain = [("    return a + b", "    return a +\n"),

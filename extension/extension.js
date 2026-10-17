@@ -107,8 +107,8 @@ function openEvents(url, onEvent, onEnd) {
 function cfg() {
   const c = vscode.workspace.getConfiguration('localIde');
   return {
-    gateway: c.get('gatewayUrl') || 'http://127.0.0.1:8080',
-    service: c.get('serviceUrl') || 'http://127.0.0.1:8090',
+    gateway: c.get('gatewayUrl') || 'http://127.0.0.1:8099/model',
+    service: c.get('serviceUrl') || 'http://127.0.0.1:8099',
     adapter: c.get('defaultAdapter') || 'mythos',
     autoApply: !!c.get('autoApply'),
     token: c.get('serviceToken') || ''

@@ -221,7 +221,7 @@ class Budget:
     def add(self, key: str, priority: int, text: str) -> None:
         if text:
             self.sections.append({"key": key, "priority": priority, "text": text,
-                                  "tokens": est_tokens(text)})
+                                  "tokens": est_tokens("## %s\n%s\n\n" % (key, text))})
 
     def total(self) -> int:
         return sum(s["tokens"] for s in self.sections)
@@ -252,7 +252,7 @@ def render(kept: List[Dict[str, Any]]) -> str:
 
 
 def build(target: str, task: str, spec: Any, workdir: str = "",
-          repo_map_files: int = 40, neighbors_max: int = 6) -> Dict[str, Any]:
+          repo_map_files: int = 40, neighbors_max: int = 6, project: str = "") -> Dict[str, Any]:
     """产出改节点要用的上下文包。
 
     Parameters
@@ -267,7 +267,9 @@ def build(target: str, task: str, spec: Any, workdir: str = "",
     target_rel = os.path.relpath(target_abs, workdir).replace("\\", "/")
 
     ctx_max = int(getattr(spec, "ctx_max", 8192) or 8192)
-    b = Budget(ctx_max)
+    ctx_for = getattr(spec, "ctx_for", None)
+    effective_ctx = min(ctx_max, int(ctx_for("edit"))) if callable(ctx_for) else ctx_max
+    b = Budget(effective_ctx)
 
     b.add("task", 100, task)
 
@@ -307,9 +309,9 @@ def build(target: str, task: str, spec: Any, workdir: str = "",
     #   纪律三：可对照——ANVIL_HR=0 关掉即回对照组，方便考核演示 A/B。
     hr_text = ""
     try:
-        from hr_bridge import enabled as _hr_on, retrieve as _hr_get
+        from context.hr_bridge import enabled as _hr_on, retrieve as _hr_get
         if _hr_on():
-            hr = _hr_get(task, target_rel, log_tag="build")
+            hr = _hr_get(task, target_rel, log_tag="build", project=project or workdir)
             hr_text = str(hr.get("text") or "")
             if hr_text:
                 b.add("hr_memory", 55, hr_text)
@@ -322,9 +324,11 @@ def build(target: str, task: str, spec: Any, workdir: str = "",
         "workdir": workdir, "target": target_rel, "target_abs": target_abs,
         "symbol": wanted or "", "text": text,
         "tokens_est": est_tokens(text), "limit_tokens": b.limit,
-        "ctx_max": ctx_max, "kept": [k["key"] for k in fitted["kept"]],
+        "ctx_max": ctx_max, "effective_ctx": effective_ctx,
+        "kept": [k["key"] for k in fitted["kept"]],
         "dropped": fitted["dropped"], "chunks": len(chunks),
-        "hr_enabled": bool(hr_text),
+        "hr_enabled": "hr_memory" in [k["key"] for k in fitted["kept"]],
+        "memory_text": hr_text if "hr_memory" in [k["key"] for k in fitted["kept"]] else "",
         "repo_map_files": len(rm["entries"]), "repo_map_truncated": rm["truncated"],
         "naive_tokens_full_file": est_tokens(_read(target_abs)),
     }
@@ -383,4 +387,4 @@ def build_workorder_context(workdir: str, target: str, task: str, spec: Any = No
     if not os.path.isfile(target_abs):        # 暂存区里找不到就回退真实目录
         base = os.path.abspath(workdir)
         target_abs = target if os.path.isabs(target) else os.path.join(base, target_rel)
-    return build(target=target_abs, task=task, spec=spec, workdir=base)
+    return build(target=target_abs, task=task, spec=spec, workdir=base, project=workdir)

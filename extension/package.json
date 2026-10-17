@@ -63,12 +63,12 @@
       "properties": {
         "localIde.gatewayUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:8080",
+          "default": "http://127.0.0.1:8099/model",
           "description": "本地模型网关地址（OpenAI 兼容；所有模型调用的唯一出口）"
         },
         "localIde.serviceUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:8090",
+          "default": "http://127.0.0.1:8099",
           "description": "工单服务地址"
         },
         "localIde.defaultAdapter": {

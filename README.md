@@ -1,136 +1,140 @@
-# Anvil 考核版
+# Anvil 原生集成考核版
 
-本地模型编码 Agent：qwen3.5:9b 驱动，分级记忆（HR）管上下文，视觉网关（SVSG）管看图。全程本地，断网可用。
+本地模型驱动的单文件 Python 编码 Agent。工单状态机负责执行与验证，HR 负责项目记忆，SVSG 负责看图和结构化证据。三者的源码、配置、运行目录与日志统一在本仓库；运行时通过 Python 对象调用，无需另外启动 HR、SVSG 或模型网关进程。
 
-- 框架底座：[suyunpledge/Anvil](https://github.com/suyunpledge/Anvil)（工单状态机 + 确定性 gate）
-- 记忆服务：[suyunpledge/hierarchical-retrieval](https://github.com/suyunpledge/hierarchical-retrieval)（HR，三级检索）
-- 视觉服务：[suyunpledge/svsg](https://github.com/suyunpledge/svsg)（SVSG，结构化视觉问答）
+## 快速启动
 
----
-
-## 怎么用
-
-### 环境要求
-
-| 依赖 | 说明 |
-|---|---|
-| AutoClaw 内嵌 python | 自带 fastapi / uvicorn 等全部依赖 |
-| Ollama + 3 个本地模型 | `qwen3.5:9b`（主模型）、`qwen2.5vl:7b`（视觉）、`bge-m3`（嵌入） |
-| HR 服务 | `api_server.py`，监听 127.0.0.1:8000 |
-| SVSG 服务 | `python -m svsg`，监听 127.0.0.1:3002 |
-
-### 启动（按顺序）
+本机已经准备 `.venv`、YOLO 权重与公交车演示图片。在本仓库目录运行：
 
 ```powershell
-$PY = "C:\Program Files\AutoClaw\resources\python\python.exe"
-
-# 0) 环境自检（离线跑，不调模型不花额度，预期 16/16 通过）
-& $PY scripts/selftest.py --core
-
-# 1) 起 HR 记忆服务
-& $PY <HR目录>\api_server.py
-
-# 2) 起 SVSG 视觉网关（本机有看门狗计划任务，通常已在跑，跳过即可）
-python -m svsg
-
-# 3) 起 Anvil 网关 + 工单服务
-& $PY gateway/app.py      # 模型调用唯一出口；令牌写 .runtime/service-token
-& $PY service/app.py
-
-# 4) 端到端验收（真实 HTTP + 真实本地模型）
-& $PY scripts/e2e_check.py
+.\start.ps1 -Doctor
+.\start.ps1
 ```
 
-VS Code 里用：把 `extension/` 复制到 `~/.vscode/extensions/local-model-ide`，重启编辑器，左侧出现 Local IDE 图标。
+打开 [工作台](http://127.0.0.1:8099/console)，将 `.runtime/service-token` 内容粘贴到右上角。页面从同一端口加载，无需双击 HTML，也无需配置浏览器跨域。令牌只保存在当前浏览器会话中。停止服务用 Ctrl+C。
 
-### 跑一个工单
+默认只监听 `127.0.0.1:8099`；改端口用 `.\start.ps1 -Port 8100`。同一个运行目录只运行一个实例。旧的 `gateway/app.py`、`service/app.py` 仍保留作排障入口；考核演示使用 `anvil.py`。
 
-1. **提交工单**：指定目标文件 + 任务描述；需要看图的任务在 `visual_tasks` 里声明（不声明则模型看不到视觉工具）
-2. **状态机自动执行**：读 → 改 → 语法门 → 类型门 → 测试门，全程无需人工盯守；写操作只允许落在目标文件上
-3. **看结果**：gate 全过即工单完成；每轮注入的记忆内容、每次工具调用及入参自动落盘到 `.runtime/integration-log/`（即考核提交物②的接入记录）
+## 在其他机器复现
 
----
+要求 Python 3.12、Ollama、本地磁盘空间和能运行 9B/7B 模型的内存。显存不足时可以回落 CPU，速度以机器实测为准。
 
-## 怎么实现的
-
-### 总体结构
-
-```
-用户 ──工单──▶ service/app.py ──▶ 状态机引擎
-                                   │
-                     ┌─────────────┼──────────────┐
-                     ▼             ▼              ▼
-                  recon 节点     edit 节点     三个 gate（纯程序，不调模型）
-                  读/搜/看图     apply_patch   语法→类型→测试
-                     │             │
-                     ▼             ▼
-              SVSG :3002       沙箱（写白名单）
-              （visual_query）
-                     │
-                     ▼
-              gateway/app.py ──▶ Ollama（qwen3.5:9b / qwen2.5vl:7b / bge-m3）
-                     │
-                     ▼
-              HR :8000（对话记忆：检索注入 / 对话后入库）
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+ollama pull qwen3.5:9b
+ollama pull qwen2.5vl:7b
+ollama pull bge-m3
 ```
 
-### 三个本地模型的分工
+准备已获使用许可的 YOLOv8n 权重到 `.runtime/models/yolov8n.pt`；可在 `anvil.toml` 的 `vision.weights` 指定其他本地路径。不会隐式下载权重或使用演示检测桩冒充真实检测。YOLO/Ultralytics 及其权重的许可证须按实际分发方式核对，详情见 `vendor/NOTICE.md`。
 
-| 模型 | 用途 | 接在哪里 |
+```powershell
+.\.venv\Scripts\python.exe anvil.py --doctor
+.\.venv\Scripts\python.exe anvil.py --prepare-demo --image C:\你的素材\bus.jpg
+.\.venv\Scripts\python.exe anvil.py
+```
+
+`--prepare-demo` 只在文件缺失时生成待实现代码，已有源码不会被重置。图片应确实含公交车；考核演示样例只验证这张固定图片和不存在路径，不是通用图像分类器。模型和依赖下载安装不计入“30 分钟跑通”；资源齐备后可用下面的一条验收命令复现整条链。
+
+## 架构与闭环
+
+```mermaid
+flowchart LR
+    UI[Web 工作台 / VS Code] --> API[Anvil HTTP :8099]
+    API --> FSM[工单状态机]
+    FSM --> CTX[代码上下文 + HR 检索]
+    FSM --> V[SVSG 检测 / 像素输入 / 复核 / 锚定]
+    FSM --> G[语法 → 类型 → 测试 gate]
+    G --> C[用户确认 → 原子落盘]
+    C --> Q[持久化记忆待入库队列]
+    Q --> HR[HR 全文 / 关键句 / 话题域]
+    HR --> CTX
+    FSM --> M[统一模型传输与出网闸]
+    HR --> M
+    V --> M
+    M --> O[本地 Ollama :11434]
+```
+
+代码模型默认 `qwen3.5:9b`，视觉及低置信区域复核模型默认 `qwen2.5vl:7b`，嵌入模型默认 `bge-m3:latest`。所有模型调用使用禁系统代理的统一传输、网关出网检查与审计。模型 HTTP 接口也挂载在 `/model`，便于外部客户端复用。
+
+### 上下文与记忆
+
+- HR 引擎直接在 Anvil 进程内运行，按真实项目路径的哈希隔离存储。暂存路径不会成为另一个项目；别的项目的历史不会被召回。
+- AST 切块、邻近符号、引用、仓库图和历史记忆共同按优先级裁剪。小文件回退全文时保留已召回记忆，修复了原来“检索到了但模型没收到”的问题。
+- 只有成功验证并落盘的工单进入 `.runtime/memory-outbox/`；待确认、拒绝和失败的修改不会当作成功经验入库。
+- 后台入库不阻塞确认响应；嵌入失败会保留待入库文件，下一次启动自动重试，也可 `python anvil.py --memory-flush` 或 `POST /memory/retry`。HR 按内容去重；单次查询的重复向量计算使用有界缓存。
+- 新存储位于 `.runtime/memory/<project-id>/`。原独立 HR 的数据库保留在原处，**不会自动把其他应用的对话混入项目库**。
+
+### 视觉与权限
+
+- 工单声明 `visual_tasks=true` 后，模型才看到 `visual_query(image_path, query)`；引擎再次检查节点授权、沙箱路径、文件格式和大小。
+- 真实链路为图片 → YOLO 检测 → SVSG IR → 原图与 IR 交给视觉模型 → 低置信区域看图复核 → 结构化断言锚定。复核复用同一个本地视觉模型，不等同于独立模型交叉验证。
+- 视觉业务状态 `rejected`、`human_review` 不会被当成成功；`delivered_with_review` 会明确标注待复审。视觉工单未取得成功视觉结果时不会完成落盘。
+- 工单工具授权只放在适配器运行时属性中，不写回持久化能力画像；下一张普通代码单不继承视觉权限。
+- 当前证据契约以检测器支持的物体、计数和几何关系为主。任意报错截图 OCR、设计稿还原、自然语言的完整事实校验不在本次已验证能力中，不承诺通用看图。
+
+### 工具与节点契约
+
+| 节点/工具 | 输入 | 输出与失败处理 |
 |---|---|---|
-| qwen3.5:9b | 主模型：理解工单、选工具、写补丁 | gateway → Ollama，走 mythos 画像（模型名覆盖） |
-| qwen2.5vl:7b | 视觉：截图/报错图/设计稿问答 | SVSG 内部调用，Agent 侧只看到 visual_query 工具 |
-| bge-m3 | 嵌入：记忆检索的向量层 | HR 内部使用 |
+| recon / 代码模型 | 任务、目标源码、沙箱目录、只读工具集 | 只读侦察；越权拒绝 |
+| HR retrieve | 项目、任务、目标名 | 关键句和关联全文；失败返回空记忆并留痕 |
+| read_file / list_dir / search_code | 沙箱相对路径或搜索模式 | 带版本的文本、目录、命中位置 |
+| visual_query | `image_path`, `query` | `status`, `claims`, `trace_id`, 复审信息；失败为工具错误 |
+| edit / apply_patch | 任务、代码、历史、工具反馈 | 最小补丁，只写声明的目标；Qwen3.5 只暴露原文替换契约，避免错误行号破坏相邻函数 |
+| syntax / type / test gate | 暂存源码、测试入口 | 程序化结果；失败回 edit，反复失败后刷新 recon，预算耗尽转人审 |
+| confirm | 工单 ID，可选 `approve` | 比对原文件及暂存版本后原子落盘；`approve=false` 与 cancel 均不会落盘 |
+| memory outbox | 已确认任务、验证摘要、变更摘要 | 项目知识入库；故障保留队列供重试 |
 
-### 状态机（框架核心）
+这里保留固定状态机，是为了让小模型只填受控槽位，三道 gate 的职责和回退路径可解释。没有接入第三方 MCP。
 
-五节点固定链 `recon → edit → gate_syntax → gate_type → gate_test`，定义在 `core/statemachine/contract.py`：
+## 测试与可复现验收
 
-- **gate 是唯一真相源**：模型说"完成了"不算数，语法/类型/测试三个程序化 gate 全过才算完成
-- **按节点授权工具**：读节点只有读工具，改节点只有 apply_patch（防止整文件重写），越权调用直接终止工单
-- **写白名单**：写操作只允许落在工单声明的目标文件上——模型改不了测试文件来把测试"改绿"
-- **失败回退**：gate 失败按契约表退回 edit 节点修复，同类失败重复出现则退回 recon 重新读上下文
+```powershell
+# 离线：原框架回归 + 新集成/故障测试；需要 Node 执行扩展静态检查
+.\.venv\Scripts\python.exe scripts/selftest.py --core
 
-### 记忆接入（HR）
+# 真实 HTTP、本地代码模型、三道 gate、确认、记忆入库和下张工单召回
+.\.venv\Scripts\python.exe scripts/integration_e2e.py
 
-`context/builder.py` 在构建每轮 prompt 时调用 HR：
+# 加入真实视觉工单
+.\.venv\Scripts\python.exe scripts/integration_e2e.py --vision-image C:\你的素材\bus.jpg
 
-- **对话前**：用户消息先经 HR `/retrieve`（话题界域路由 → 关键句 → 全文段落），命中的记忆按 token 预算注入；`builder.py` 原有的 AST 切块 + 预算裁剪逻辑（管代码上下文）与记忆注入共用同一套预算，超预算从低优先级开始扔
-- **对话后**：有价值的对话内容经 `/ingest` 入库，HR 自动做全文层 + 关键句层两级提炼
-- **留痕**：每轮实际注入的 key_sentences / full_contexts、消耗 token 数，落盘 `.runtime/integration-log/`
+# 内置组件 HR / SVSG 的原项目回归（不调模型；SVSG 须在其目录下运行）
+.\.venv\Scripts\python.exe -m pytest vendor/hr/tests -q
+pushd vendor\vision; ..\..\.venv\Scripts\python.exe -m pytest tests -q; popd
+```
 
-### 视觉接入（SVSG）
+端到端脚本自动在临时端口启动单进程服务，只修改新建演示沙箱，最后停止它自己启动的服务；报告、模型实际 token 数和全部工单记录保存在 `.runtime/acceptance/<run-id>/`。原两套外部服务不参与验收。离线测试通过替身模拟模型输出，不能替代真实模型验收。
 
-SVSG 注册为状态机工具 `visual_query`（`core/statemachine/tools.py`）：
+故障注入已编入集成回归：第一次补丁语法错误，gate 拒绝并把原文错误反馈给修复轮；修复后重新经过三道 gate。嵌入服务故障则验证“待入库文件保留 → 恢复后重试成功”。
 
-- **入参** `{image_path, question}`；**出参** SVSG 结构化答案（声明 + 证据锚点，不是一段自由文本）
-- **任务路由**：工单声明 `visual_tasks` 字段控制可见性——声明了的工单，recon 节点工具集里才有 `visual_query`；没声明的工单模型想调也调不到。这就是"哪些任务给视觉、哪些不给"的显式开关
-- **典型链路**：报错截图 → visual_query 返回"第 23 行 NameError" → edit 节点修复 → 测试 gate 验证
+## 接口、日志与成本边界
 
-### 工具清单
+除 `/health`、`/model/health` 和不含数据的控制台静态页面外，数据与操作接口要求同一个 `X-Local-Ide-Token` 或 Bearer 令牌。
 
-| 工具 | 挂载节点 | 入参 | 出参 | 约束 |
-|---|---|---|---|---|
-| `read_file` | recon / edit | `{path}` | 文件内容（带版本号） | 路径必须在沙箱根内 |
-| `list_dir` | recon | `{path}` | 目录清单 | 同上 |
-| `search_code` | recon / edit | `{pattern}` | 命中行清单 | 同上 |
-| `apply_patch` | edit | `{path, old, new, expected_version}` | 补丁结果 | 只落目标文件；版本号不符拒写 |
-| `run_shell` | shell（预留） | `{cmd}` | 执行结果 | 命令闸白名单（v1 未开放） |
-| `visual_query` | recon（考核版新增） | `{image_path, question}` | SVSG 结构化答案 | 仅 visual_tasks 声明的工单可见 |
-
-### 安全默认
-
-- 全部服务只监听 127.0.0.1，端点强制令牌（服务端强制，客户端开关无效）
-- 测试子进程跑在干净环境里（丢代理/凭据，HOME 指向临时目录）
-- 沙箱是缓解不是隔离：挡意外与顺手，不挡有意为之
-
----
-
-## 提交物索引
-
-| 考核提交物 | 位置 |
+| 接口 | 用途 |
 |---|---|
-| ① 仓库 + README | 本文件 |
-| ② 接入记录 | `.runtime/integration-log/`（自动落盘） |
-| ③ 现场演示 | `docs/演示脚本.md` + 演示数据集 |
-| ④ MCP 声明 | 未复用第三方 MCP，接入物均自研（见文首三链接） |
+| `POST /wo` / `GET /wo/{id}` | 创建工单、查询运行结果 |
+| `GET /wo/{id}/staged` | 审阅暂存内容与 diff |
+| `POST /wo/{id}/confirm` / `cancel` | 确认或拒绝落盘 |
+| `GET /wo/{id}/records` | 查看这张工单的上下文、模型、工具入参和记忆记录 |
+| `GET /integrations` | 依赖、模型和本地权重就绪状态，不做推理 |
+| `POST /memory/retry` | 异步重试待入库记忆 |
+| `POST /model/v1/chat/completions` | 对外模型接口 |
+
+配置文件 `anvil.toml` 是模型与资源限制的主入口。默认每单最多 16 次代码模型槽位调用、2 次视觉工具请求；每次视觉请求最多 1 次区域复核 + 2 次回答生成；单次生成上限 2048 token。代码/记忆/视觉请求超时分别为 180/60/120 秒，区域复核预算为视觉预算的 1/4，图片上限 16 MiB。代码槽位的网络重试关闭，故障由状态机显式处理。
+
+本地 Ollama 不产生按 token 付费的 API 账单；硬件、电力和耗时并非零成本。每次调用记录实际 `prompt_eval_count`、`eval_count` 和耗时，演示时以报告中的实测值为准。上述是调用及输出上限，并非整张工单的硬实时截止时间；模型输入和推理速度仍取决于任务与硬件。
+
+日志与数据在 `.runtime/`，令牌、模型权重、缓存和 `.env` 被 git 及交付打包排除。上下文和工具日志可能含源码，分享前只导出演示工单记录。
+
+## 考核提交物
+
+1. 本仓库、依赖文件、启动命令与本地演示数据生成器。
+2. 工单详情“查看本单接入记录”：模型名、每轮实际消息、工具清单、工具入参、视觉证据及记忆状态。
+3. [五分钟演示脚本](docs/演示脚本.md)、[集成审查报告](docs/集成审查报告-2026-10-17.md)。
+4. 无第三方 MCP 复用；HR/SVSG 来源、提交版本、源文件哈希与本地未提交改动清单在 `vendor/manifest.json`，许可证说明在 `vendor/NOTICE.md`。
+
+`core/` 在集成版中由 Anvil 维护；`scripts/sync_core.py` 只允许 `--check`，防止旧镜像同步覆盖集成修复。既有 `CODEX-HANDOFF.md` 和早期审查文档属于历史资料，当前启动与能力边界以本文件为准。

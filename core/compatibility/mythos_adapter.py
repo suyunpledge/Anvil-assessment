@@ -142,6 +142,8 @@ class MythosAdapter:
         self.transport_retries, self._retries_by_node = self._parse_transport_retries(transport_retries)
         self._lock = threading.RLock()
         self.profile = self._load_profile()
+        # 工单授权不能写入持久画像，否则下一张纯代码单会继承视觉能力。
+        self.runtime_toolsets: Dict[str, List[str]] = {}
 
     @staticmethod
     def _parse_transport_retries(spec: Union[int, Dict[str, int]]) -> Tuple[int, Dict[str, int]]:
@@ -276,10 +278,27 @@ class MythosAdapter:
         with self._lock:
             override = self.profile.get("node_toolsets") or {}
         if isinstance(node_or_list, str):
-            mix = override.get(node_or_list) or self.spec.tools_for_key(node_or_list)
+            mix = self.runtime_toolsets.get(node_or_list)
+            if mix is None:
+                mix = [name for name in (override.get(node_or_list) or self.spec.tools_for_key(node_or_list))
+                       if name != "visual_query"]
         else:
             mix = list(node_or_list)
-        return [registry[n] for n in mix if n in registry]
+        selected = [registry[n] for n in mix if n in registry]
+        if self.spec.key == "qwen3.5":
+            # 真机回归：9B 会算错无行号源码的位置，并误删相邻函数。
+            # 仅收窄本模型看到的补丁契约，其他模型与全局 registry 保持原样。
+            import copy
+            selected = copy.deepcopy(selected)
+            for schema in selected:
+                fn = schema["function"]
+                if fn["name"] == "apply_patch":
+                    parameters = fn["parameters"]
+                    parameters["properties"] = {key: value for key, value in parameters["properties"].items()
+                                                if key in ("path", "old_string", "new_string", "expected_version")}
+                    parameters["required"] = ["path", "old_string", "new_string"]
+                    fn["description"] = "按原文做一次最小替换：old_string须逐字匹配目标源码；new_string为新内容。不要改目标函数以外的内容。"
+        return selected
 
     @staticmethod
     def _allowed_names(tools: Sequence[Dict[str, Any]]) -> set:
@@ -337,6 +356,8 @@ class MythosAdapter:
         }
         if tools:
             body["tools"] = tools
+        if getattr(self, "max_output_tokens", None):
+            body["options"]["num_predict"] = int(self.max_output_tokens)
         # ★ sends_think=False 的模型（如 qwen2.5-coder）传 think 会直接 HTTP 400，
         #   这一层就把键摘掉，而不是指望调用方记得别传。
         if think is not None and self.spec.sends_think:

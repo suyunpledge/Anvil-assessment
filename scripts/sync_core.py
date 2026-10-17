@@ -137,6 +137,9 @@ def main(argv=None) -> int:
     ap.add_argument("--from", dest="src", default=DEFAULT_UPSTREAM, help="上游路径")
     ap.add_argument("--check", action="store_true", help="只比对，不写入")
     args = ap.parse_args(argv)
+    if os.path.isfile(os.path.join(_ROOT, "anvil.toml")) and not args.check:
+        print("集成版 core 已由 Anvil 本地维护，禁止镜像覆盖；可用 --check 只读比对后手工移植。")
+        return 1
 
     upstream = os.path.abspath(args.src)
     if not os.path.isdir(upstream):

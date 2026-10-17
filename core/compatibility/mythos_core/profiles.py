@@ -258,7 +258,8 @@ QWEN35 = ModelProfile(
     #   T4 对照 think=False：14.4s，apply_patch 参数逐字正确（old_string 精准）。
     #   Mythos 画像的 E15（edit 必须开思考）在它身上不成立——原生 tool_calls 模型
     #   的补丁质量不靠思考链撑。recon 保留 slot 关思考（NODE_KIND 默认即关）。
-    think_policy={**dict(THINK_POLICY), "edit": False},
+    think_policy={**dict(THINK_POLICY), "edit": False, "repair": False},
+    edit_prompt_hint="本模型只使用 old_string + new_string 按原文替换。禁止 start_line/end_line 行号模式；文件前面的方括号标题不是源码。不要凭估算行号改动相邻函数。",
     notes="考核版主力：原生工具通道；think 键可发但 edit 关（实测 141s→14s，质量不降）。",
     evidence=("2026-10-17 T1 think=true OK（thinking=557）",
               "2026-10-17 T2 原生 tool_calls，apply_patch 参数逐字正确",

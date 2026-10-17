@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Dict
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _COMPAT = os.path.join(os.path.dirname(_HERE), "compatibility")
@@ -46,7 +47,7 @@ def build_adapter(kind: str = "mythos", model: str = None, profile_path: str = N
     kind = (kind or "mythos").lower()
     load_generated_profiles()
     if kind not in ADAPTERS and kind not in ALL_PROFILES:
-        raise SystemExit("未知适配层/画像 %r；可用：%s"
+        raise ValueError("未知适配层/画像 %r；可用：%s"
                          % (kind, ", ".join(sorted(set(ADAPTERS) | set(ALL_PROFILES)))))
     spec = get_profile(kind)
     if profile_path:

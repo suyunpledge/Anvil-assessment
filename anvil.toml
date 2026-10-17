@@ -1,0 +1,21 @@
+# 单进程入口：python anvil.py；无需启动 HR :8001 / SVSG :3002 / gateway :8098
+[models]
+ollama = "http://127.0.0.1:11434"
+code = "qwen3.5:9b"
+vision = "qwen2.5vl:7b"
+embedding = "bge-m3:latest"
+embedding_dim = 1024
+
+[limits]
+model_calls = 16
+vision_requests = 2
+output_tokens = 2048
+model_timeout = 180
+memory_timeout = 60
+vision_timeout = 120
+image_bytes = 16777216
+
+[vision]
+# yolo 使用本地权重，缺失时明确失败，禁止隐式下载。
+detector = "yolo"
+weights = ".runtime/models/yolov8n.pt"

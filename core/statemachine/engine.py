@@ -30,6 +30,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT = os.path.dirname(_HERE)
+if os.path.dirname(_PROJECT) not in sys.path:
+    sys.path.insert(0, os.path.dirname(_PROJECT))
 _COMPAT = os.path.join(_PROJECT, "compatibility")
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -133,6 +135,9 @@ class WorkOrderStateMachine:
     ) -> None:
         self.ad = adapter
         self.wo = wo
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", wo.wo_id):
+            raise ValueError("非法工单标识")
         self.staging_root = staging_root or os.path.join(_PROJECT, ".sm-work")
         self.best_of_n = max(1, min(int(best_of_n or 1), MAX_BEST_OF_N))
         self.commit_enabled = commit
@@ -174,6 +179,9 @@ class WorkOrderStateMachine:
 
     def _step(self, node: str, turn: int, kind: str, ok: bool, detail: str = "",
               tool: str = "", sec: Optional[float] = None) -> None:
+        from integration.trace import record
+        record("step", wo_id=self.wo.wo_id, node=node, turn=turn, step_kind=kind,
+               ok=ok, detail=detail, tool=tool, sec=sec)
         self.wo.add_step(Step(node=node, round_no=self.wo.round_no, turn=turn,
                               kind=kind, ok=ok, detail=detail, tool=tool, sec=sec))
 
@@ -189,7 +197,13 @@ class WorkOrderStateMachine:
         src = os.path.abspath(self.wo.workdir)
         if not os.path.isdir(src):
             raise Terminal(STATUS_FAILED, "沙箱目录不存在：%s" % src)
-        target_abs = os.path.join(src, self.wo.target.replace("\\", "/"))
+        try:
+            target_abs = ToolContext(root=src, target=self.wo.target).resolve(self.wo.target)
+        except ToolError as exc:
+            raise Terminal(STATUS_SECURITY_ABORT, str(exc)) from exc
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", self.wo.wo_id):
+            raise Terminal(STATUS_SECURITY_ABORT, "非法工单标识")
         if not os.path.isfile(target_abs):
             raise Terminal(STATUS_FAILED, "目标文件不存在：%s" % self.wo.target)
 
@@ -209,7 +223,7 @@ class WorkOrderStateMachine:
                 now_v = _tools.content_version(target_abs)
             except Exception:
                 now_v = ""
-            if now_v and now_v != self.initial_version:
+            if now_v != self.initial_version:
                 raise Terminal(
                     STATUS_FAILED,
                     "目标文件在工单开始后已被修改（%s → %s），拒绝以新版本为基线继续；"
@@ -249,6 +263,7 @@ class WorkOrderStateMachine:
         不动全局 NODE_TOOLSETS / 画像类字段——service 进程里下一个纯代码工单
         的工具面与之前完全一致（v1 教训：模块级突变=进程级污染）。
         """
+        self.ad.runtime_toolsets = {}
         if not self.wo.budget("visual_tasks", False):
             return
         try:
@@ -259,27 +274,28 @@ class WorkOrderStateMachine:
             _ctx_dir = os.path.dirname(_PROJECT) if os.path.basename(_PROJECT) == "core" else _PROJECT
             _ctx_dir = os.path.join(_ctx_dir, "context")
             sys.path.insert(0, _ctx_dir)
-            from visual_tools import install_visual_tools
+            from context.visual_tools import install_visual_tools
             if not self._visual_installed:
                 install_visual_tools()   # 幂等：REGISTRY/EXECUTORS 全局只装一次（工具本体无状态）
                 self._visual_installed = True
             self._visual_ok = True
             self._log("视觉工具已装载（visual_query，工单级授权）")
         except Exception as e:
-            self._log("视觉工具装载失败（不影响工单）：%s" % e)
-            return
+            raise Terminal(STATUS_FAILED, "视觉工具装载失败：%s" % e) from e
         # 适配器实例级覆盖：让模型在本单的 recon/edit 里看得见 visual_query
         try:
-            prof = getattr(self.ad, "profile", None)
-            if isinstance(prof, dict):
-                ovr = prof.setdefault("node_toolsets", {})
+            if getattr(self.ad, "spec", None) is not None:
+                ovr = {}
                 for node in ("recon", "edit"):
                     lst = list(ovr.get(node) or self.ad.spec.tools_for_key(node))
                     if "visual_query" not in lst:
                         lst.append("visual_query")
                     ovr[node] = lst
+                self.ad.runtime_toolsets = ovr
+                # 视觉任务先拿证据，再开放普通侦察；小模型不必在多种工具间猜顺序。
+                ovr["recon"] = ["visual_query"]
         except Exception as e:
-            self._log("视觉工具适配器覆盖失败（模型看不到 visual_query）：%s" % e)
+            raise Terminal(STATUS_FAILED, "视觉工具授权配置失败：%s" % e) from e
 
     # ---------------- 引擎级工具执行（第二道闸） ----------------
     def _execute_call(self, ctx: ToolContext, call: Dict[str, Any], node: str,
@@ -330,7 +346,23 @@ class WorkOrderStateMachine:
             else:
                 args.pop("expected_version", None)
 
-        res = execute(ctx, name, args)
+        from integration.trace import record
+        if name == "visual_query":
+            from integration.config import settings
+            requests = self.wo.artifacts.get("vision_requests", 0)
+            if requests >= settings()["limits"]["vision_requests"]:
+                raise ToolError("本工单视觉请求预算已用尽")
+            self.wo.artifacts["vision_requests"] = requests + 1
+        try:
+            res = execute(ctx, name, args)
+        except Exception as exc:
+            record("tool", node=node, turn=turn, tool=name, args=args, ok=False, error=str(exc)[:400])
+            raise
+        record("tool", node=node, turn=turn, tool=name, args=args, ok=True, result=res)
+        if name == "visual_query":
+            self.wo.artifacts["visual_used"] = True
+            self.wo.artifacts["visual_evidence"] = result_to_text(res)[:4000]
+            self.ad.runtime_toolsets["recon"] = list(self.ad.spec.tools_for_key("recon")) + ["visual_query"] if getattr(self.ad, "spec", None) else ["visual_query"]
         ctx.note(name, args, True)
         self._step(node, turn, "tool", True, result_to_text(res)[:200], tool=name,
                    sec=res.get("sec"))
@@ -352,8 +384,12 @@ class WorkOrderStateMachine:
             pass
 
     # ---------------- 消息组装 ----------------
-    @staticmethod
-    def _sys_recon() -> str:
+    def _sys_recon(self) -> str:
+        if self._visual_ok and not self.wo.artifacts.get("visual_used"):
+            return ("你是视觉侦察节点。当前步骤必须先通过工具通道调用 visual_query，"
+                    "image_path 和 query 根据任务里的图片路径与问题填写。"
+                    "不要把 visual_query 写成 Python 源码，不要只描述将来要调用。"
+                    "收到视觉工具结果后给出简短结论。你没有修改文件权限。")
         return (
             "你是一个只读侦察节点（read-only recon）。框架已经知道目标文件，"
             "你可用工具：read_file / list_dir / search_code。\n"
@@ -412,7 +448,9 @@ class WorkOrderStateMachine:
             listing = execute(ctx, "list_dir", {"path": "."})["listing"]
         except Exception as e:
             listing = "（列表失败：%s）" % e
-        return ("# 任务\n%s\n\n# 沙箱目录（暂存区）\n%s\n\n# 目标文件 %s 的当前内容\n%s\n\n"
+        visual_hint = ("本单有视觉任务：你可调用 visual_query(image_path, query) 看图。必须获得成功视觉结果再完成修改。\n"
+                       if self._visual_ok else "")
+        return visual_hint + ("# 任务\n%s\n\n# 沙箱目录（暂存区）\n%s\n\n# 目标文件 %s 的当前内容\n%s\n\n"
                 "# 你的任务\n确认上面的内容，指出要实现的目标函数应该放在哪里。"
                 "信息够就直接给结论，不要调用工具。"
                 % (self.wo.task, listing, self.wo.target, target_src))
@@ -423,11 +461,13 @@ class WorkOrderStateMachine:
         # ★ 上下文层（外部审查 #6）：能注入就用预算裁剪过的上下文，
         #   而不是把目标文件全文塞进 prompt；失败就回退全文，不阻断工单。
         ctx_text = ""
+        memory_text = ""
         if self.context_provider is not None:
             try:
                 pack = self.context_provider(self.wo.task, self.wo.target) or {}
-                self.context_info = {k: v for k, v in pack.items() if k != "text"}
+                self.context_info = {k: v for k, v in pack.items() if k not in ("text", "memory_text")}
                 ctx_text = str(pack.get("text") or "")
+                memory_text = str(pack.get("memory_text") or "")
             except Exception as e:
                 self._log("上下文层不可用，回退全文：%s" % e)
                 self.context_info = {"error": str(e)[:200]}
@@ -448,10 +488,15 @@ class WorkOrderStateMachine:
             parts.append("# 已裁剪的代码上下文（框架按预算注入，比全文小）\n%s" % ctx_text)
         else:
             parts.append("# 目标文件当前内容\n%s" % recon.get("target_source", ""))
+            # 小文件回退全文时，记忆仍须进入模型；原实现把整包一起丢掉了。
+            if memory_text:
+                parts.append("# 已召回项目记忆\n%s" % memory_text)
         if recon.get("notes"):
             parts.append("# 侦察结论\n%s" % recon["notes"])
         if recon.get("search_hits"):
             parts.append("# 相关引用\n%s" % recon["search_hits"])
+        if recon.get("visual_evidence"):
+            parts.append("# 已完成的视觉分析（按该证据写纯 Python，不要在源码中调用对话工具）\n%s" % recon["visual_evidence"])
         if feedback:
             parts.append("# 上一次尝试的失败反馈（来自确定性 gate，必须优先解决）\n%s" % feedback)
         parts.append("# 要求\n现在调用 apply_patch，只改 %s，给出最小补丁。" % self.wo.target)
@@ -473,6 +518,7 @@ class WorkOrderStateMachine:
         tag = "（重新侦察）" if refresh else ""
         self._log("读节点%s：开始" % tag)
         bundle: Dict[str, Any] = {"notes": "", "search_hits": "", "turns": 0}
+        bundle["visual_evidence"] = self.wo.artifacts.get("visual_evidence", "")
         try:
             fresh = execute(ctx, "read_file", {"path": self.wo.target})
             bundle["target_source"] = fresh["text"]
@@ -504,11 +550,16 @@ class WorkOrderStateMachine:
                         if c["name"] == "search_code":
                             bundle["search_hits"] = (bundle.get("search_hits") or
                                                      "") + result_to_text(res)[:1500] + "\n"
+                        if c["name"] == "visual_query":
+                            bundle["visual_evidence"] = result_to_text(res)[:4000]
                     except ToolError as e:
                         messages.append({"role": "tool", "name": c["name"],
                                          "content": "工具失败：%s" % e})
                 continue
             if r.kind == "no_call":
+                if self._visual_ok and not self.wo.artifacts.get("visual_used"):
+                    messages.append({"role": "user", "content": "视觉证据尚未取得。现在必须发起 visual_query 工具调用，不能只给文字结论。"})
+                    continue
                 bundle["notes"] = (r.content or "").strip()
                 break
             if r.kind == "schema_violation":
@@ -533,6 +584,8 @@ class WorkOrderStateMachine:
                 raise Terminal(STATUS_FAILED, "读节点上下文超限：需要走检索精简（R5）")
             if r.kind in ("transport_error", "exhausted"):
                 raise Terminal(STATUS_FAILED, "读节点失败（%s）：%s" % (r.kind, r.error or ""))
+        if self._visual_ok and not self.wo.artifacts.get("visual_used"):
+            raise Terminal(STATUS_NEEDS_INPUT, "视觉侦察未取得可用证据，停止编辑；请检查视觉模型或图片")
         self._log("读节点完成：%d 轮，结论 %s" % (bundle["turns"], (bundle["notes"] or "（无）")[:60]))
         return bundle
 
@@ -644,6 +697,8 @@ class WorkOrderStateMachine:
             feedback = ""
             while True:
                 patch = self._node_edit(ctx, recon, feedback)
+                if self._visual_ok and not self.wo.artifacts.get("visual_used"):
+                    raise Terminal(STATUS_NEEDS_INPUT, "视觉工单未取得成功的看图结果，不能仅凭猜测完成；请检查图片与视觉模型后重试")
                 self.wo.artifacts.setdefault("patches", []).append(
                     {"round": self.wo.round_no,
                      **{k: v for k, v in patch.items() if k != "diff"},
@@ -673,6 +728,17 @@ class WorkOrderStateMachine:
                                    "修复轮用尽（%d 轮）最后失败在 %s：降级人审"
                                    % (max_rounds, failed.gate))
                 feedback = failed.feedback_text()
+                # 小模型常把侦察阶段的对话工具当成可 import 的运行时函数写进交付代码；
+                # gate 的通用提示（「import 进来」）会继续带偏，这里点名纠正。
+                tool_leaks = sorted({
+                    name for name in REGISTRY
+                    if any(i.type == "undefined_name" and ("名字 %s 未定义" % name) in i.message
+                           for i in failed.issues)
+                })
+                if tool_leaks:
+                    feedback += ("\n注意：%s 是框架在侦察阶段提供的对话工具，不是可 import 的 "
+                                 "Python 函数，交付代码中禁止出现；请删除相关调用，依据侦察阶段"
+                                 "已获得的结论用纯 Python 实现。" % "、".join(tool_leaks))
                 # ★ 回退表里写的「同一 gate 连续失败 escalate_after 次 → 先重跑读节点」
                 #   三个 gate 都要生效（原来只对 gate_test 的失败签名做了）。
                 gname = failed.gate
@@ -752,10 +818,10 @@ class WorkOrderStateMachine:
             res.wo.artifacts["context"] = self.context_info
         # 累计变更（原文件 → 当前文件）：这才是人看的「这次到底改了什么」
         try:
-            orig = open(os.path.join(self.staging, ".sm_original_target.py"),
-                        "r", encoding="utf-8").read()
-            cur = open(os.path.join(self.staging, self.wo.target.replace("\\", "/")),
-                       "r", encoding="utf-8").read()
+            with open(os.path.join(self.staging, ".sm_original_target.py"), "r", encoding="utf-8") as source:
+                orig = source.read()
+            with open(os.path.join(self.staging, self.wo.target.replace("\\", "/")), "r", encoding="utf-8") as source:
+                cur = source.read()
             fd = diff_text(orig, cur, "原/" + self.wo.target, "新/" + self.wo.target)
             res.wo.artifacts["final_diff"] = fd
             res.wo.artifacts["final_stats"] = diff_stats(fd)

@@ -86,6 +86,19 @@ class CancellableAdapter:
         self._flag = flag
         self.spec = getattr(inner, "spec", None)
         self.model = getattr(inner, "model", None)
+        self.calls_used = 0
+
+    @property
+    def profile(self):
+        return getattr(self._inner, "profile", None)
+
+    @property
+    def runtime_toolsets(self):
+        return self._inner.runtime_toolsets
+
+    @runtime_toolsets.setter
+    def runtime_toolsets(self, value):
+        self._inner.runtime_toolsets = value
 
     def _check(self) -> None:
         if self._flag.is_set():
@@ -93,7 +106,23 @@ class CancellableAdapter:
 
     def fill_slot(self, *a, **kw):
         self._check()
-        return self._inner.fill_slot(*a, **kw)
+        from integration.config import settings
+        from integration.trace import record
+        if self.calls_used >= settings()["limits"]["model_calls"]:
+            raise RuntimeError("工单模型调用预算已用尽")
+        self.calls_used += 1
+        kw.setdefault("timeout", settings()["limits"]["model_timeout"])
+        node = kw.get("node") or (a[0] if a else "")
+        messages = kw.get("messages") or (a[1] if len(a) > 1 else [])
+        registry = kw.get("registry") or (a[2] if len(a) > 2 else {})
+        tools_for = getattr(self._inner, "tools_for", None)
+        schemas = tools_for(node, registry) if tools_for else []
+        record("context", node=node, model=self.model, call=self.calls_used,
+               messages=messages, tools=schemas)
+        result = self._inner.fill_slot(*a, **kw)
+        record("adapter_result", node=node, model=self.model, call=self.calls_used,
+               result_kind=result.kind, ok=result.ok, calls=result.calls, error=result.error)
+        return result
 
     def ask(self, *a, **kw):
         self._check()
@@ -117,7 +146,7 @@ class RunnerOpts:
     workdir: str = ""                      # code：沙箱根；tidy：要整理的目录
     target: str = ""                       # code：目标文件（相对 workdir）
     test_path: str = ""                    # code：测试文件
-    adapter: str = "mythos"                # 适配层 key（见 compatibility/profiles.py）
+    adapter: str = "qwen3.5"               # 适配层 key（见 compatibility/profiles.py）
     model: str = ""                        # 覆盖模型名（画像不变）
     mode: str = "dry_run"                  # tidy：dry_run | execute
     dirs: List[str] = field(default_factory=list)     # tidy：允许归入的目录
@@ -141,8 +170,17 @@ def build_adapter(opts: RunnerOpts):
     ``LOCAL_LLM_VIA=direct`` 可显式指定直连（仅用于排障）。
     """
     from adapter_factory import build_adapter as _ba
-    ad = _ba(kind=opts.adapter, model=opts.model or None)
+    from integration.config import settings
+    cfg = settings()
+    ad = _ba(kind=opts.adapter, model=opts.model or (cfg["models"]["code"] if opts.adapter == "qwen3.5" else None))
+    ad.max_output_tokens = cfg["limits"]["output_tokens"]
+    ad.transport_retries = 0
+    ad._retries_by_node = {}
     via = (os.environ.get("LOCAL_LLM_VIA") or "gateway").lower()
+    if via == "native":
+        from integration.models import AgentTransport
+        ad.transport = AgentTransport()
+        return ad
     if via == "direct":
         return ad
     gw = os.environ.get("LOCAL_LLM_GATEWAY", "http://127.0.0.1:8080")
@@ -188,6 +226,8 @@ class WorkOrderRunner:
         # `emit() got multiple values for argument 'kind'`）。工单类别请用 ``wo_kind``。
         ev = {"ts": time.time(), "kind": kind, "wo": self.wo_id}
         ev.update(kw)
+        from integration.trace import record
+        record("event", wo_id=self.wo_id, event=ev)
         self.events.put(ev)
         if kind in ("node", "gate", "violation", "status", "error", "done", "progress"):
             self.timeline.append(ev)
@@ -215,9 +255,10 @@ class WorkOrderRunner:
         """
         self._cancel.set()
         # 已终态且不再运行：直接改判 cancelled（线程已退出，不会再来改它）
-        if (not self.alive and self.status in (STATUS_NEEDS_INPUT_LIKE)
-                and self.status != STATUS_AWAITING_CONFIRM):
-            with self._lock:
+        if not self.alive and self.status in STATUS_NEEDS_INPUT_LIKE:
+            with self._confirm_lock, self._lock:
+                if self.status not in STATUS_NEEDS_INPUT_LIKE:
+                    return False
                 self.status = "cancelled"
             self.emit("status", status="cancelled", reason="用户放弃")
             return True
@@ -234,6 +275,11 @@ class WorkOrderRunner:
 
     # ---------------- 执行 ----------------
     def _run_guarded(self) -> None:
+        from integration.trace import scope
+        with scope(wo_id=self.wo_id, project=os.path.realpath(self.opts.workdir)):
+            self._run_scoped()
+
+    def _run_scoped(self) -> None:
         try:
             if self.opts.kind == "tidy":
                 self._run_tidy()
@@ -256,6 +302,7 @@ class WorkOrderRunner:
             self.status = STATUS_RUNNING
         self.emit("status", status=STATUS_RUNNING, wo_kind="code")
         base = self.adapter if self.adapter is not None else build_adapter(self.opts)
+        self.adapter = base
         ad = CancellableAdapter(base, self._cancel)
         workdir = os.path.abspath(self.opts.workdir)
         real_path = os.path.join(workdir, self.opts.target.replace("\\", "/"))
@@ -320,6 +367,7 @@ class WorkOrderRunner:
             self.emit("violation", rule=v.get("rule"), detail=v.get("detail", "")[:200])
 
         self._stage_dir = res.staging
+        self.error = res.error or ""
         self._staged_target = os.path.join(res.staging, self.opts.target.replace("\\", "/"))
         try:
             with open(self._staged_target, "r", encoding="utf-8") as f:
@@ -363,6 +411,22 @@ class WorkOrderRunner:
                 self.status = res.status
             self.emit("status", status=res.status, diff=res.diff)
         self.emit("done", status=self.status)
+        if self.status == STATUS_DONE:
+            self._remember_success()
+
+    def _remember_success(self) -> None:
+        from context.hr_bridge import enabled
+        if not enabled():
+            return
+        from integration.memory import enqueue
+        try:
+            text = "已确认并通过验证的工单 %s。任务：%s。目标：%s。验证：%s。修改摘要：%s" % (
+                self.wo_id, self.opts.task[:1000], self.opts.target,
+                json.dumps(self.result.get("gates", []), ensure_ascii=False)[:1200],
+                str(self.result.get("diff", ""))[:2500])
+            self.result["memory_outbox"] = enqueue(self.opts.workdir, self.wo_id, text)
+        except Exception as exc:
+            self.emit("error", message="修改已保存，但记忆排队失败：%s" % exc)
 
     # ---- tidy 链 ----
     def _run_tidy(self) -> None:
@@ -428,6 +492,8 @@ class WorkOrderRunner:
     def confirm(self) -> Dict[str, Any]:
         """人确认后落盘。code 类复制暂存文件；tidy 类执行方案并复核。"""
         with self._confirm_lock:
+            if self._cancel.is_set():
+                return {"ok": False, "error": "工单已取消，不能确认"}
             if self.status != STATUS_AWAITING_CONFIRM:
                 return {"ok": False, "error": "当前状态不需要确认：%s" % self.status}
             if self.opts.kind == "tidy":
@@ -445,17 +511,21 @@ class WorkOrderRunner:
         except Exception:
             now_v = ""
         was_v = str(self.result.get("real_version") or "")
-        if was_v and now_v and now_v != was_v:
+        if was_v and now_v != was_v:
             return {"ok": False,
                     "error": "目标文件在工单开始后已被修改（%s → %s），已拒绝覆盖；"
                              "请重新建单。" % (was_v[7:15], now_v[7:15])}
-        tmp = real + ".ide-commit"
+        staged_v = str(self.result.get("staged_version") or "")
+        if staged_v and TOOLS.content_version(self._staged_target) != staged_v:
+            return {"ok": False, "error": "暂存结果在验证后被修改，拒绝落盘"}
+        tmp = real + ".ide-commit-" + uuid.uuid4().hex
         shutil.copyfile(self._staged_target, tmp)
         os.replace(tmp, real)
         with self._lock:
             self.status = STATUS_DONE
         self.emit("applied", path=real)
         self.emit("status", status=STATUS_DONE)
+        self._remember_success()
         return {"ok": True, "path": real}
 
     def _confirm_tidy(self) -> Dict[str, Any]:
@@ -481,6 +551,8 @@ class WorkOrderRunner:
         """对外快照。**顶层 status 永远是运行器状态**，不可被结果集覆盖。"""
         d = {
             "wo_id": self.wo_id, "status": self.status, "kind": self.opts.kind,
+            "target": self.opts.target, "adapter": self.opts.adapter,
+            "model": self.opts.model or getattr(self.adapter, "model", ""),
             "task": self.opts.task, "created": self.created, "error": self.error,
             "elapsed": round(time.time() - self.created, 2),
             "timeline": self.timeline[-80:],

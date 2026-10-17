@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import ipaddress
 import json
 import os
@@ -441,7 +442,7 @@ def build_app():
             return JSONResponse(status_code=400,
                                 content={"error": "流式不在这个端点上提供，请用 /v1/chat/completions"})
         t0 = time.time()
-        code, resp = post_ollama("/api/chat", body)
+        code, resp = await asyncio.to_thread(post_ollama, "/api/chat", body)
         audit({"kind": "ollama.chat", "model": model, "status": code,
                "sec": round(time.time() - t0, 3), "profile": pinfo.get("profile"),
                "stripped_think": pinfo.get("stripped_think", False),
@@ -467,7 +468,7 @@ def build_app():
                                      media_type="text/event-stream")
 
         t0 = time.time()
-        code, resp = post_ollama("/api/chat", oll)
+        code, resp = await asyncio.to_thread(post_ollama, "/api/chat", oll)
         audit({"kind": "chat", "model": model, "status": code,
                "sec": round(time.time() - t0, 3), "profile": pinfo.get("profile"),
                "stripped_think": pinfo.get("stripped_think", False),

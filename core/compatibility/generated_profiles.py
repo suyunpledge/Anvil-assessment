@@ -1,7 +1,3 @@
-import os, sys
-_B = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if os.path.join(_B, 'compatibility') not in sys.path:
-    sys.path.insert(0, os.path.join(_B, 'compatibility'))
 # -*- coding: utf-8 -*-
 """generated_profiles.py —— 由 probes/gen_profiles.py 自动生成的画像草表。
 
@@ -13,6 +9,13 @@ if os.path.join(_B, 'compatibility') not in sys.path:
 来源：probes/local_model_profile.json
 """
 from __future__ import annotations
+
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 from mythos_core.config import (CTX_DEFAULT, CTX_INTERACTIVE_MAX, CTX_MAX, CTX_POLICY,
                                 TEMP_LADDER, THINK_POLICY, TRANSPORT_RETRIES_DEFAULT)
@@ -46,7 +49,7 @@ GENERATED["mythos-v2-8b"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=True, sends_think=True, ctx_max=40960,
     note="由体检自动推导。四项均通过。",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=True"),
+    evidence=('P: 体检 fableforge-ai/mythos-v2-8b:q4_k_m', "P: native=True content=False picks=True patch=True"),
 )
 
 # ---- ministral-3:8b ----
@@ -55,7 +58,7 @@ GENERATED["ministral-3"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=True, sends_think=False, ctx_max=262144,
     note="由体检自动推导。think_only_false→已关",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=True"),
+    evidence=('P: 体检 ministral-3:8b', "P: native=True content=False picks=True patch=True"),
 )
 
 # ---- gpt-oss:20b ----
@@ -64,7 +67,7 @@ GENERATED["gpt-oss"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=True, sends_think=True, ctx_max=131072,
     note="由体检自动推导。四项均通过。",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=True"),
+    evidence=('P: 体检 gpt-oss:20b', "P: native=True content=False picks=True patch=True"),
 )
 
 # ---- qwen3:14b ----
@@ -73,7 +76,7 @@ GENERATED["qwen3"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=True, sends_think=True, ctx_max=40960,
     note="由体检自动推导。四项均通过。",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=True"),
+    evidence=('P: 体检 qwen3:14b', "P: native=True content=False picks=True patch=True"),
 )
 
 # ---- gemma4:e4b ----
@@ -82,7 +85,7 @@ GENERATED["gemma4"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=True, sends_think=True, ctx_max=131072,
     note="由体检自动推导。四项均通过。",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=True"),
+    evidence=('P: 体检 gemma4:e4b', "P: native=True content=False picks=True patch=True"),
 )
 
 # ---- qwen3.5:9b ----
@@ -91,7 +94,7 @@ GENERATED["qwen3-5"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=False, sends_think=True, ctx_max=262144,
     note="由体检自动推导。weak_edit",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=False"),
+    evidence=('P: 体检 qwen3.5:9b', "P: native=True content=False picks=True patch=False"),
 )
 
 # ---- qwen2.5-coder:7b ----
@@ -100,7 +103,7 @@ GENERATED["qwen2-5-coder"] = _p(
     native=False, content=True, picks=True, restraint=True,
     patch=True, sends_think=False, ctx_max=32768,
     note="由体检自动推导。think_only_false→已关",
-    evidence=("P: 体检 %s"  % m, "P: native=False content=True picks=True patch=True"),
+    evidence=('P: 体检 qwen2.5-coder:7b', "P: native=False content=True picks=True patch=True"),
 )
 
 # ---- llama3.1:8b ----
@@ -109,7 +112,7 @@ GENERATED["llama3-1"] = _p(
     native=True, content=False, picks=False, restraint=False,
     patch=True, sends_think=False, ctx_max=131072,
     note="由体检自动推导。think_only_false→已关；weak_tool；no_restraint",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=False patch=True"),
+    evidence=('P: 体检 llama3.1:8b', "P: native=True content=False picks=False patch=True"),
 )
 
 # ---- glm4:9b ----
@@ -118,7 +121,7 @@ GENERATED["glm4"] = _p(
     native=False, content=False, picks=False, restraint=True,
     patch=False, sends_think=False, ctx_max=131072,
     note="由体检自动推导。think_only_false→已关；UNUSABLE(不会调工具)；weak_tool；weak_edit",
-    evidence=("P: 体检 %s"  % m, "P: native=False content=False picks=False patch=False"),
+    evidence=('P: 体检 glm4:9b', "P: native=False content=False picks=False patch=False"),
 )
 
 # ---- qwen3:8b ----
@@ -127,7 +130,7 @@ GENERATED["qwen3"] = _p(
     native=True, content=False, picks=True, restraint=True,
     patch=True, sends_think=True, ctx_max=40960,
     note="由体检自动推导。四项均通过。",
-    evidence=("P: 体检 %s"  % m, "P: native=True content=False picks=True patch=True"),
+    evidence=('P: 体检 qwen3:8b', "P: native=True content=False picks=True patch=True"),
 )
 
 # ---- deepseek-r1:7b ----
@@ -136,5 +139,5 @@ GENERATED["deepseek-r1"] = _p(
     native=False, content=False, picks=False, restraint=True,
     patch=False, sends_think=True, ctx_max=131072,
     note="由体检自动推导。UNUSABLE(不会调工具)；weak_tool；weak_edit",
-    evidence=("P: 体检 %s"  % m, "P: native=False content=False picks=False patch=False"),
+    evidence=('P: 体检 deepseek-r1:7b', "P: native=False content=False picks=False patch=False"),
 )

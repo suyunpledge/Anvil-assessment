@@ -31,5 +31,10 @@ micro_bench_result*.json
 
 # local debug artifacts
 .openclaw/
+.env
+.env.*
+*.pt
+.ruff_cache/
+.mypy_cache/
 
 .runtime/

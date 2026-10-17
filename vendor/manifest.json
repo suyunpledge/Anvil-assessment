@@ -1,0 +1,73 @@
+{
+  "hr": {
+    "repository": "https://github.com/suyunpledge/hierarchical-retrieval",
+    "commit": "dca400f23b118dae72c6f36d89a0166b15996540",
+    "local_changes": [],
+    "sha256": {
+      "hierarchical_retrieval/__init__.py": "80cbf9551750aaa026c978ddd63931596bc618fbb0d9690feb97c4d1390bb007",
+      "hierarchical_retrieval/config.py": "60394850f719e224a87cb545de42123fd505797bcab32d317c9717a1342c4637",
+      "hierarchical_retrieval/core/__init__.py": "d16eb5c767de3a697150aae3dcbe7d5eda56b41f10b562d5937bd1ec18f2b7af",
+      "hierarchical_retrieval/core/cloud_cache.py": "6365933d863cc0eed2fb18c386cbd67e036411587e08e4bd03c427944427eb31",
+      "hierarchical_retrieval/core/embedding.py": "64d21f919bc48b34b5cb1226506138078458689a75e1f899961d7c65e55bc8cb",
+      "hierarchical_retrieval/core/key_sentence.py": "9ce41fcc710ef9898b46b8cae744d7f2fe48da6c93e63a21d82a0f6986469aa2",
+      "hierarchical_retrieval/core/retrieval.py": "92946244b61d9fb3a25c9a6897f0c7930e0f9fde45d886a70135ddb3f7d9075f",
+      "hierarchical_retrieval/core/topic_domain.py": "51f8a6ea0dd6d0a4a6117c8ab40bd507d2b5973a7bc6e89faa016d171798d508",
+      "hierarchical_retrieval/examples/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "hierarchical_retrieval/examples/demo.py": "674c66302d44c1814420ce0d5988ae874a4dea43764429b1ef37c965396467b5",
+      "hierarchical_retrieval/py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "hierarchical_retrieval/storage/__init__.py": "9df8a9e6f1448310110632a3b22bbcdfbd20e772976554b03bf38d0ca87b972d",
+      "hierarchical_retrieval/storage/base.py": "6f861d0297a7194862d3ab2fc28e8791e057c35561938a307e7ed41831f12fc7",
+      "hierarchical_retrieval/storage/local_storage.py": "3e1a71c8492ccade0de9bc1aeff64005d97a0ef75507e4437081d9353272df84",
+      "hierarchical_retrieval/storage/vector_store.py": "e3c23a83c29bc4f4255ec1aeeded4baedabd504125700e568641ac9c0fc2bf14",
+      "hierarchical_retrieval/utils/__init__.py": "51233248f8234f8e641bae3c31449c3cd83005116ff1e6a5865ece1400361168",
+      "hierarchical_retrieval/utils/summarizer.py": "542181be9222084763b727c8b1b7e1090f19521019caac241279f3a5b949c071",
+      "hierarchical_retrieval/utils/text_processor.py": "1b7eedaddd43b3dca32802d0ce7b3f2cf462401b1dcfaa9ef03eafe8ebaab54a"
+    },
+    "auxiliary_sha256": {
+      "api_server.py": "85e92721eb117fc4e36d281545c678255387843b864a0cc622341a62e3d07470"
+    }
+  },
+  "vision": {
+    "repository": "https://github.com/suyunpledge/svsg",
+    "commit": "88b4dc2ab8dcf65545d51858c47e94fd4824a27f",
+    "local_changes": [
+      ".gitignore",
+      "svsg/api.py",
+      "svsg/l3_orchestrator/agent_loop.py",
+      "tests/test_app_config.py",
+      "tests/test_orchestrator.py"
+    ],
+    "sha256": {
+      "svsg/__init__.py": "27596ea55737e371e3ad355f7e31a7e22351e9714fbc88d7427ba68e09a010fe",
+      "svsg/__main__.py": "971c92515d75d94fdd026404e98fe5c1c9c0a4fb5d59fa6f65fcaa0c0761f95b",
+      "svsg/api.py": "26eab45bc75e4597a0a739b52e8dcd202f87f5e17052cc413c255872fcb47b39",
+      "svsg/auth.py": "8abb020e145488b26e64f06da09caca9a85619af065d4971a1097b635a49b588",
+      "svsg/config.py": "c59d112cf6073b194aac16e698ddbb221163b632761991c8fbd54430f0f1b83d",
+      "svsg/contracts/__init__.py": "e7cd12b270f6cbcd4b33f1f75c286cbf8a1808bc74bf1d9de98d48639c71b412",
+      "svsg/contracts/enums.py": "a5ddec7a9d85149ae2235df74c48b036c9d0d721b4d301733d89543eddaedb46",
+      "svsg/contracts/errors.py": "a871cd4ba4b5a153f9aa641bbedcebc4ba58da102c44757b9b84e7161ba064f8",
+      "svsg/contracts/ir_schema.py": "cd9352b17c7a31bbda5db5ad1669a72d904efd6bbf663141940ead190dc34514",
+      "svsg/contracts/verification_schema.py": "3f8e93b7c130f696970b24bc371648d5a6989fbd3a90228963436dc01298d924",
+      "svsg/l15_verifier/__init__.py": "ace0e083a4c5acdbc5200201275d311ac743c304e376f35a6e3e96b0b0a0f80f",
+      "svsg/l15_verifier/fallback.py": "f51159498e7b4f8a43f2f73229cbfc9f916c32fb8d03fae1a7c18ad3904fd054",
+      "svsg/l15_verifier/service.py": "f0149f8d6ff9fe275573a5afcb422cdc802c7abfa7cf847ad0bbe3956a2d9ce0",
+      "svsg/l1_compiler/__init__.py": "ef1a91f25aad5b7bf5d358d19cb035d137e4ba8294d9b4b5f0486c273d12d8ec",
+      "svsg/l1_compiler/compiler.py": "72ff93e79872e2547729064a8a28caa5dc91588486ca8197e139532edb137746",
+      "svsg/l1_compiler/detector_adapter.py": "350987cc6ccaa81d369135c19601eb51f0803c711780844e597690dfb6ed7edd",
+      "svsg/l1_compiler/geometry_engine.py": "321f1c687332815c5fd9ebc864283dead9166b4350d532dd50786a3cca1b2f22",
+      "svsg/l1_compiler/uncertainty_estimator.py": "0e33486be9dc7661bd65e3702ab1c77a7f2526dc5a243560a38874a25e780a21",
+      "svsg/l2_runtime/__init__.py": "db8499f649b60175d09f06a5d26c9077b7081295d7de3c5380c56c0437bbe900",
+      "svsg/l2_runtime/conflict_resolver.py": "f725efd9caf112455b8c743ccf0bebf29067d47f875df7916cefdbf64375f036",
+      "svsg/l2_runtime/evidence_anchor.py": "ea12b25a8bbee73af18f69234530f41388e292faf67fb9ba068f1d7399bea276",
+      "svsg/l2_runtime/fsm.py": "7aed4d014dc39a96734648c49fa85fea8c5cdd79b1b6c95f7fce42b773f6aebb",
+      "svsg/l2_runtime/intent_router.py": "4f548d2b7a75df42ae1263208cda37e4cd82a81dcdce3aa35f11316e4bd3daf6",
+      "svsg/l2_runtime/param_validator.py": "bbf8ab2da321acfe27cd35a959afc46b3c3323514d35b9b064bb0ec9c56528a8",
+      "svsg/l3_orchestrator/__init__.py": "15d031c13c63ab657d669b74c575aca926a20361d7063c8123747e21064ea3b3",
+      "svsg/l3_orchestrator/agent_loop.py": "da798ea49e440dbaa279ec93c07c07ce4b75f9ce8af22a11ac361772cf62721b",
+      "svsg/l3_orchestrator/openai_adapter.py": "403b03d06103570cb4de6fb4019984856017ec9b6f23cca780265c52e98bd536",
+      "svsg/l3_orchestrator/prompts.py": "f61ae0d9d810283e7b2aa42e9b8fc02281516775372ea117ae6d7f5f1823c105",
+      "svsg/observability.py": "6d157d71b3cbca588e6a72a3c1b9c80a45ad5105f812f1cf1a86cf43c7191a76",
+      "svsg/py.typed": "f91e84552592747cf161d4f1fc0ffea4d82d45c82e9d46c823435a4b3ce92815"
+    }
+  }
+}
