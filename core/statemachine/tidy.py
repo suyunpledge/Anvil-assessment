@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from contract import GateIssue, GateResult
+from tools import ToolContext, ToolError
 
 import safeops  # 删除+备份的唯一真相源（同目录模块，2026-10-03）
 
@@ -217,6 +218,13 @@ def check_plan(root: str, plan: Dict[str, Any], order: TidyOrder) -> GateResult:
             continue
         src_rel = _rel(src)
         dst_rel = _rel(dst)
+        try:
+            ctx = ToolContext(root=root, target="")
+            ctx.resolve(src_rel)
+            if not _is_del:
+                ctx.resolve(dst_rel)
+        except ToolError as exc:
+            issues.append(GateIssue("unsafe_path", "第 %d 个动作：%s" % (i + 1, exc)))
         if os.path.isabs(src_rel) or ".." in src_rel.split("/"):
             issues.append(GateIssue("src_outside", "第 %d 个动作的源越出根目录：%s" % (i + 1, src)))
         if not _is_del and (os.path.isabs(dst_rel) or ".." in dst_rel.split("/")):
@@ -267,11 +275,17 @@ def apply_plan(root: str, plan: Dict[str, Any], log: Optional[List[str]] = None)
     moved: List[Dict[str, str]] = []
     deleted: List[Dict[str, str]] = []
     created_dirs: List[str] = []
+    ctx = ToolContext(root=root, target="")
+    # 整条计划先检查，避免前几条已移动后才发现后续路径越界。
+    for mv in plan.get("moves", []):
+        ctx.resolve(_rel(mv.get("src", "")))
+        if mv.get("dst"):
+            ctx.resolve(_rel(mv["dst"]))
     for mv in plan.get("moves", []):
         src = _rel(mv.get("src", ""))
         dst = _rel(mv.get("dst", ""))
-        s_abs = os.path.join(root, src)
-        d_abs = os.path.join(root, dst)
+        s_abs = ctx.resolve(src)
+        d_abs = ctx.resolve(dst) if dst else ""
 
         # ★ 删除动作（2026-10-03）：走 safeops —— 先备份、校验、再删。
         #   本函数只应在「已获人工同意」后被调用（服务层 confirm 之后才 apply），

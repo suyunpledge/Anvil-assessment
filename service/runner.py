@@ -16,17 +16,17 @@
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import queue
-import shutil
+import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
-
-import sys
+from typing import Any, Dict, List, Optional
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -34,14 +34,17 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from core.paths import ensure_core_on_path, runtime_path  # noqa: E402
+from integration.scheduler import ModelCancelled, model_scope  # noqa: E402
+from integration.config import default_adapter  # noqa: E402
+from service.events import EventBuffer  # noqa: E402
 
 ensure_core_on_path()
 
-import engine as _engine                                    # noqa: E402  (core/statemachine)
-import tidy as TD                                            # noqa: E402
-import tools as TOOLS                                        # noqa: E402
-from contract import WorkOrder                                # noqa: E402
-from tidy import TidyOrder                                    # noqa: E402
+import engine as _engine  # noqa: E402  (core/statemachine)
+import tidy as TD  # noqa: E402
+import tools as TOOLS  # noqa: E402
+from contract import WorkOrder  # noqa: E402
+from tidy import TidyOrder  # noqa: E402
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -77,8 +80,7 @@ class Cancelled(Exception):
 class CancellableAdapter:
     """包一层适配器，提供「在两个节点之间可被打断」的能力。
 
-    为什么这样做而不是改核心：核心是上游仓库的快照，不该为了界面需求改它。
-    取消的语义只需要「不再往下跑」，包一层足够，而且换任何适配器都能用。
+    模型请求前后均检查取消；服务层在实际落盘处再次检查并串行处理确认和取消。
     """
 
     def __init__(self, inner: Any, flag: threading.Event) -> None:
@@ -120,13 +122,26 @@ class CancellableAdapter:
         record("context", node=node, model=self.model, call=self.calls_used,
                messages=messages, tools=schemas)
         result = self._inner.fill_slot(*a, **kw)
+        self._check()
         record("adapter_result", node=node, model=self.model, call=self.calls_used,
                result_kind=result.kind, ok=result.ok, calls=result.calls, error=result.error)
         return result
 
     def ask(self, *a, **kw):
         self._check()
-        return self._inner.ask(*a, **kw)
+        from integration.config import settings
+        from integration.trace import record
+        if self.calls_used >= settings()["limits"]["model_calls"]:
+            raise RuntimeError("工单模型调用预算已用尽")
+        self.calls_used += 1
+        kw.setdefault("timeout", settings()["limits"]["model_timeout"])
+        record("context", node="plan", model=self.model, call=self.calls_used,
+               messages=kw.get("messages") or (a[0] if a else []), tools=[])
+        result = self._inner.ask(*a, **kw)
+        self._check()
+        record("adapter_result", node="plan", model=self.model, call=self.calls_used,
+               result_kind=result.kind, ok=result.ok, error=result.error)
+        return result
 
     def record(self, *a, **kw):
         try:
@@ -146,7 +161,7 @@ class RunnerOpts:
     workdir: str = ""                      # code：沙箱根；tidy：要整理的目录
     target: str = ""                       # code：目标文件（相对 workdir）
     test_path: str = ""                    # code：测试文件
-    adapter: str = "qwen3.5"               # 适配层 key（见 compatibility/profiles.py）
+    adapter: str = field(default_factory=default_adapter)
     model: str = ""                        # 覆盖模型名（画像不变）
     mode: str = "dry_run"                  # tidy：dry_run | execute
     dirs: List[str] = field(default_factory=list)     # tidy：允许归入的目录
@@ -170,9 +185,14 @@ def build_adapter(opts: RunnerOpts):
     ``LOCAL_LLM_VIA=direct`` 可显式指定直连（仅用于排障）。
     """
     from adapter_factory import build_adapter as _ba
+
     from integration.config import settings
     cfg = settings()
-    ad = _ba(kind=opts.adapter, model=opts.model or (cfg["models"]["code"] if opts.adapter == "qwen3.5" else None))
+    kind = opts.adapter or default_adapter()
+    model = opts.model or (cfg["models"]["code"] if kind == default_adapter() else None)
+    # 工具成功率和节点覆盖按模型隔离，避免切模型时继承另一模型的运行画像。
+    profile_id = hashlib.sha256((kind + "\0" + (model or "")).encode("utf-8")).hexdigest()[:20]
+    ad = _ba(kind=kind, model=model, profile_path=runtime_path("model-profiles", profile_id + ".json"))
     ad.max_output_tokens = cfg["limits"]["output_tokens"]
     ad.transport_retries = 0
     ad._retries_by_node = {}
@@ -185,8 +205,7 @@ def build_adapter(opts: RunnerOpts):
         return ad
     gw = os.environ.get("LOCAL_LLM_GATEWAY", "http://127.0.0.1:8080")
     try:
-        sys.path.insert(0, os.path.join(_ROOT, "gateway"))
-        from client import route_adapter_through_gateway
+        from gateway.client import route_adapter_through_gateway
         route_adapter_through_gateway(ad, gw, strict=os.environ.get("LOCAL_LLM_VIA") != "direct")
     except Exception as e:
         # 不静默降级：要么过网关，要么把问题说清楚（可一键切 direct 排障）
@@ -204,20 +223,21 @@ class WorkOrderRunner:
         self.opts = opts
         self.wo_id = opts.wo_id or ("wo-%s" % uuid.uuid4().hex[:10])
         self.adapter = adapter
-        self.events: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self.events = EventBuffer()
         self._cancel = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.status = "pending"
         self.result: Dict[str, Any] = {}
         self.created = time.time()
         self.error = ""
-        self._lock = threading.Lock()
-        self._confirm_lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._confirm_lock = threading.RLock()
         self._stage_dir = ""
         self._staged_target = ""
         self._staged_content = ""
         self._tidy_plan: Dict[str, Any] = {}
         self._tidy_scan: Dict[str, Any] = {}
+        self._tidy_order = None
         self.timeline: List[Dict[str, Any]] = []
 
     # ---------------- 事件 ----------------
@@ -228,9 +248,11 @@ class WorkOrderRunner:
         ev.update(kw)
         from integration.trace import record
         record("event", wo_id=self.wo_id, event=ev)
-        self.events.put(ev)
-        if kind in ("node", "gate", "violation", "status", "error", "done", "progress"):
-            self.timeline.append(ev)
+        with self._lock:
+            ev = self.events.put(ev)
+            if kind in ("node", "gate", "violation", "status", "error", "done", "progress"):
+                self.timeline.append(ev)
+                del self.timeline[:-80]
 
     def drain(self, timeout: float = 0.0) -> List[Dict[str, Any]]:
         out = []
@@ -253,21 +275,30 @@ class WorkOrderRunner:
         取消的含义是"用户放弃这单"，状态应转为 cancelled——否则面板上它会永远
         停在 needs_input，用户点丢弃却看不到任何变化（2026-09-30 实测暴露）。
         """
-        self._cancel.set()
-        # 已终态且不再运行：直接改判 cancelled（线程已退出，不会再来改它）
-        if not self.alive and self.status in STATUS_NEEDS_INPUT_LIKE:
-            with self._confirm_lock, self._lock:
-                if self.status not in STATUS_NEEDS_INPUT_LIKE:
-                    return False
-                self.status = "cancelled"
-            self.emit("status", status="cancelled", reason="用户放弃")
+        with self._confirm_lock, self._lock:
+            if self.status == STATUS_CANCELLED:
+                return True
+            if self.status in (STATUS_DONE, STATUS_FAILED, "security_abort"):
+                return False
+            self._cancel.set()
+            if self.status in STATUS_NEEDS_INPUT_LIKE or not self.alive:
+                self.status = STATUS_CANCELLED
+                self.emit("status", status=STATUS_CANCELLED, reason="用户放弃")
+            else:
+                self.emit("status", status="cancelling")
             return True
-        self.emit("status", status="cancelling")
-        return True
 
     def join(self, timeout: Optional[float] = None) -> None:
         if self._thread:
             self._thread.join(timeout)
+
+    def request_stop(self) -> None:
+        """关闭服务时只发出协作停止信号，不等待提交锁或磁盘留痕。
+
+        已进入的提交仍完成；其余节点在现有取消检查点退出。
+        用户主动取消继续使用 cancel()，保留其状态与返回值语义。
+        """
+        self._cancel.set()
 
     @property
     def alive(self) -> bool:
@@ -276,16 +307,22 @@ class WorkOrderRunner:
     # ---------------- 执行 ----------------
     def _run_guarded(self) -> None:
         from integration.trace import scope
-        with scope(wo_id=self.wo_id, project=os.path.realpath(self.opts.workdir)):
-            self._run_scoped()
+        try:
+            with scope(wo_id=self.wo_id, project=os.path.realpath(self.opts.workdir)), \
+                    model_scope(cancel=self._cancel):
+                self._run_scoped()
+        finally:
+            self.events.finish()
 
     def _run_scoped(self) -> None:
         try:
+            if self._cancel.is_set():
+                raise Cancelled("已被取消")
             if self.opts.kind == "tidy":
                 self._run_tidy()
             else:
                 self._run_code()
-        except Cancelled:
+        except (Cancelled, ModelCancelled):
             with self._lock:
                 self.status = STATUS_CANCELLED
             self.emit("status", status=STATUS_CANCELLED, reason="cancelled")
@@ -327,8 +364,7 @@ class WorkOrderRunner:
             所以这里从状态机实例上取 staging 路径，保证上下文描述的是「将要被改的那份文件」。
             """
             try:
-                sys.path.insert(0, os.path.join(_ROOT, "context"))
-                import builder as _ctxb
+                from context import builder as _ctxb
                 spec = getattr(ad, "spec", None)
                 staging = getattr(sm_ref, "staging", "") or None
                 return _ctxb.build_workorder_context(workdir=workdir, target=target,
@@ -341,7 +377,8 @@ class WorkOrderRunner:
             ad, wo,
             staging_root=runtime_path("staging"),
             runlog_dir=runtime_path("runs"),
-            commit=not self.opts.require_confirm,
+            # 所有服务写入都在运行器提交锁内执行，免确认也不能绕过取消检查。
+            commit=False,
             initial_version=initial_version or None,
             context_provider=_ctx_provider,
             verbose=False,
@@ -375,7 +412,6 @@ class WorkOrderRunner:
         except OSError:
             self._staged_content = ""
 
-        real_path = real_path  # 已在上面算好
         # 暂存版本（用于比对）与真实版本（用于确认时再校验）
         try:
             staged_version = TOOLS.content_version(self._staged_target) \
@@ -401,18 +437,23 @@ class WorkOrderRunner:
             "questions": wo.questions,
             "context": wo.artifacts.get("context") or {},
         }
-        if res.status == "done" and self.opts.require_confirm:
-            with self._lock:
-                self.status = STATUS_AWAITING_CONFIRM
-            self.emit("status", status=STATUS_AWAITING_CONFIRM,
-                      diff=res.diff, needs_confirm=True)
-        else:
-            with self._lock:
-                self.status = res.status
-            self.emit("status", status=res.status, diff=res.diff)
-        self.emit("done", status=self.status)
-        if self.status == STATUS_DONE:
-            self._remember_success()
+        with self._confirm_lock:
+            ad._check()
+            if res.status == "done":
+                with self._lock:
+                    self.status = STATUS_AWAITING_CONFIRM
+                if self.opts.require_confirm:
+                    self.emit("status", status=STATUS_AWAITING_CONFIRM,
+                              diff=res.diff, needs_confirm=True)
+                else:
+                    committed = self._confirm_code()
+                    if not committed["ok"]:
+                        raise RuntimeError(committed["error"])
+            else:
+                with self._lock:
+                    self.status = res.status
+                self.emit("status", status=res.status, diff=res.diff)
+            self.emit("done", status=self.status)
 
     def _remember_success(self) -> None:
         from context.hr_bridge import enabled
@@ -424,7 +465,9 @@ class WorkOrderRunner:
                 self.wo_id, self.opts.task[:1000], self.opts.target,
                 json.dumps(self.result.get("gates", []), ensure_ascii=False)[:1200],
                 str(self.result.get("diff", ""))[:2500])
-            self.result["memory_outbox"] = enqueue(self.opts.workdir, self.wo_id, text)
+            item = enqueue(self.opts.workdir, self.wo_id, text)
+            with self._lock:
+                self.result["memory_outbox"] = item
         except Exception as exc:
             self.emit("error", message="修改已保存，但记忆排队失败：%s" % exc)
 
@@ -434,13 +477,14 @@ class WorkOrderRunner:
             self.status = STATUS_RUNNING
         self.emit("status", status=STATUS_RUNNING, wo_kind="tidy")
         base = self.adapter if self.adapter is not None else build_adapter(self.opts)
+        self.adapter = base
         ad = CancellableAdapter(base, self._cancel)
         hints = {}
         if self.opts.semantic and self.opts.dirs:
             # 与 CLI 保持同一套描述表；写在这里是避免服务依赖 gateway 模块
             hints = {d: _DEFAULT_HINTS.get(d, "%s 类文件" % d) for d in self.opts.dirs}
         # 人确认模式下先只出方案（dry_run），确认时再执行
-        mode = "dry_run" if self.opts.require_confirm else self.opts.mode
+        mode = "dry_run"
         # ★ 2026-10-03：删除能力由工单显式声明。allow_delete 为真时，方案闸才放行
         #   delete 动作；真正的「同意」由服务端 require_confirm + /confirm 接口保证，
         #   「备份」由 safeops 在 apply 阶段保证（写-校验-删）。
@@ -450,6 +494,7 @@ class WorkOrderRunner:
                           constraints={"allow_delete": bool(self.opts.allow_delete),
                                        "overwrite": False,
                                        "max_repair_rounds": self.opts.max_repair_rounds})
+        self._tidy_order = order
         from tidy_engine import TidyStateMachine
         sm = TidyStateMachine(ad, order, runlog_dir=runtime_path("runs"), verbose=False,
                               on_event=lambda m: self.emit("progress", message=m),
@@ -474,19 +519,22 @@ class WorkOrderRunner:
             "semantic": getattr(sm, "semantic_notes", {}),
             "moves": plan_moves,
         }
-        if res.status == "done" and mode == "dry_run" and res.plan.get("moves"):
-            self._tidy_scan = TD.scan_root(os.path.abspath(self.opts.workdir),
-                                           order.filters)
-            with self._lock:
-                self.status = STATUS_AWAITING_CONFIRM
-            # 事件里带上完整清单，SSE 前端可以直接渲染
-            self.emit("status", status=STATUS_AWAITING_CONFIRM, needs_confirm=True,
-                      moves=len(plan_moves), plan=plan_moves)
-        else:
-            with self._lock:
-                self.status = res.status
-            self.emit("status", status=res.status)
-        self.emit("done", status=self.status)
+        with self._confirm_lock:
+            ad._check()
+            if res.status == "done" and res.plan.get("moves"):
+                self._tidy_scan = TD.scan_root(os.path.abspath(self.opts.workdir), order.filters)
+                with self._lock:
+                    self.status = STATUS_AWAITING_CONFIRM
+                if not self.opts.require_confirm and self.opts.mode == "execute":
+                    self._confirm_tidy()
+                else:
+                    self.emit("status", status=STATUS_AWAITING_CONFIRM, needs_confirm=True,
+                              moves=len(plan_moves), plan=plan_moves)
+            else:
+                with self._lock:
+                    self.status = res.status
+                self.emit("status", status=res.status)
+            self.emit("done", status=self.status)
 
     # ---------------- 确认落盘 ----------------
     def confirm(self) -> Dict[str, Any]:
@@ -504,23 +552,12 @@ class WorkOrderRunner:
         real = self.result.get("real_path") or ""
         if not real or not os.path.isfile(self._staged_target):
             return {"ok": False, "error": "找不到暂存结果"}
-        # ★ 落盘前比对的是**工单开始前**记下的版本（外部审查 #3）。
-        #   原来拿“模型跑完之后”的版本当基线，会漏掉“运行期间用户改了文件”这种情况。
+        from commit import commit_verified
         try:
-            now_v = TOOLS.content_version(real) if os.path.exists(real) else ""
-        except Exception:
-            now_v = ""
-        was_v = str(self.result.get("real_version") or "")
-        if was_v and now_v != was_v:
-            return {"ok": False,
-                    "error": "目标文件在工单开始后已被修改（%s → %s），已拒绝覆盖；"
-                             "请重新建单。" % (was_v[7:15], now_v[7:15])}
-        staged_v = str(self.result.get("staged_version") or "")
-        if staged_v and TOOLS.content_version(self._staged_target) != staged_v:
-            return {"ok": False, "error": "暂存结果在验证后被修改，拒绝落盘"}
-        tmp = real + ".ide-commit-" + uuid.uuid4().hex
-        shutil.copyfile(self._staged_target, tmp)
-        os.replace(tmp, real)
+            real = commit_verified(self.opts.workdir, self.opts.target, self._staged_target,
+                                   self.result.get("real_version"), self.result.get("staged_version"))
+        except (OSError, TOOLS.ToolError) as exc:
+            return {"ok": False, "error": str(exc)}
         with self._lock:
             self.status = STATUS_DONE
         self.emit("applied", path=real)
@@ -530,6 +567,14 @@ class WorkOrderRunner:
 
     def _confirm_tidy(self) -> Dict[str, Any]:
         root = os.path.abspath(self.opts.workdir)
+        # 等待确认期间，目录可能被改动，授权及路径门必须重新检查。
+        order = self._tidy_order or TidyOrder(wo_id=self.wo_id, task=self.opts.task, root=root,
+                                             target_dirs=list(self.opts.dirs),
+                                             constraints={"allow_delete": self.opts.allow_delete, "overwrite": False})
+        gate = TD.check_plan(root, self._tidy_plan, order)
+        if not gate.ok:
+            return {"ok": False, "error": "整理方案在确认前已失效，请重新建单",
+                    "verify": gate.to_dict()}
         scan = self._tidy_scan or TD.scan_root(root)
         applied = TD.apply_plan(root, self._tidy_plan, log=[])
         vg = TD.verify_after(root, self._tidy_plan, scan, applied)
@@ -549,6 +594,10 @@ class WorkOrderRunner:
     # ---------------- 对外快照 ----------------
     def snapshot(self) -> Dict[str, Any]:
         """对外快照。**顶层 status 永远是运行器状态**，不可被结果集覆盖。"""
+        with self._lock:
+            return self._snapshot()
+
+    def _snapshot(self) -> Dict[str, Any]:
         d = {
             "wo_id": self.wo_id, "status": self.status, "kind": self.opts.kind,
             "target": self.opts.target, "adapter": self.opts.adapter,
@@ -561,21 +610,47 @@ class WorkOrderRunner:
             if k in ("real_path", "status"):
                 continue
             d[k] = v
-        return d
+        return copy.deepcopy(d)
 
 
 # ============================================================
 # 注册表（按 wo_id 管理）
 # ============================================================
+class RegistryBusy(RuntimeError):
+    pass
+
+
 class RunnerRegistry:
-    def __init__(self) -> None:
+    def __init__(self, max_active=None, max_retained=None) -> None:
         self._items: Dict[str, WorkOrderRunner] = {}
         self._lock = threading.Lock()
+        from integration.config import settings
+        limits = settings()["service"]
+        self.max_active = max_active or limits["max_active"]
+        self.max_retained = max_retained or limits["max_retained"]
+        self._closing = False
 
     def add(self, runner: WorkOrderRunner) -> str:
         with self._lock:
+            self._admit(runner)
             self._items[runner.wo_id] = runner
         return runner.wo_id
+
+    def _admit(self, runner, launching=False):
+        if self._closing:
+            raise RegistryBusy("服务正在停止，暂不接收新工单")
+        if runner.wo_id in self._items:
+            raise ValueError("工单标识已存在")
+        active = sum(r.alive or r.status in ("pending", STATUS_RUNNING) for r in self._items.values())
+        if launching and active >= self.max_active:
+            raise RegistryBusy("运行工单达到上限 %d，请稍后重试" % self.max_active)
+        while len(self._items) >= self.max_retained:
+            removable = next((key for key, r in self._items.items()
+                              if not r.alive and r.status in
+                              (STATUS_DONE, STATUS_CANCELLED, STATUS_FAILED, "security_abort")), None)
+            if removable is None:
+                raise RegistryBusy("待处理工单达到保留上限，请先确认或取消已有工单")
+            del self._items[removable]
 
     def get(self, wo_id: str) -> Optional[WorkOrderRunner]:
         with self._lock:
@@ -587,20 +662,48 @@ class RunnerRegistry:
 
     def create(self, opts: RunnerOpts, adapter: Any = None) -> WorkOrderRunner:
         r = WorkOrderRunner(opts, adapter=adapter)
-        self.add(r)
-        r.start()
+        with self._lock:
+            self._admit(r, launching=True)
+            self._items[r.wo_id] = r
+            try:
+                r.start()
+            except Exception:
+                del self._items[r.wo_id]
+                raise
         return r
+
+    def shutdown(self, timeout=2):
+        deadline = time.monotonic() + max(0, timeout)
+        with self._lock:
+            if self._closing:
+                return sum(r.alive for r in self._items.values())
+            self._closing = True
+            runners = list(self._items.values())
+        for runner in runners:
+            if runner.alive:
+                runner.request_stop()
+        for runner in runners:
+            runner.join(max(0, deadline - time.monotonic()))
+        return sum(r.alive for r in runners)
+
+    def open(self):
+        with self._lock:
+            if self._closing and any(r.alive for r in self._items.values()):
+                raise RegistryBusy("上一轮后台工单尚未退出，不能重新启动服务")
+            self._closing = False
 
 
 def list_presets() -> Dict[str, Any]:
     """列出可用适配层与模型（供扩展的下拉框用）。"""
     from mythos_core.profiles import ALL_PROFILES, UNUSABLE_TOOL_MODELS, load_generated_profiles
     load_generated_profiles()
+    from integration.config import settings
+    default = default_adapter()
     return {
-        "profiles": [{"key": k, "model": p.model, "label": p.label,
+        "profiles": [{"key": k, "model": settings()["models"]["code"] if k == default else p.model, "label": p.label,
                       "sends_think": p.sends_think, "ctx_max": p.ctx_max,
                       "notes": (p.notes or "")[:120]}
                      for k, p in sorted(ALL_PROFILES.items())],
         "unusable": UNUSABLE_TOOL_MODELS,
-        "default": "mythos",
+        "default": default,
     }

@@ -6,11 +6,11 @@ from pathlib import Path
 from core.paths import ensure_core_on_path, runtime_path
 
 
-def prepare(image: str = "") -> str:
+def prepare(image: str = "", *, destination=None) -> str:
     ensure_core_on_path()
     from fake_adapter import make_sandbox
 
-    root = Path(runtime_path("demo-sandbox", "integrated"))
+    root = Path(destination) if destination is not None else Path(runtime_path("demo-sandbox", "integrated"))
     root.mkdir(parents=True, exist_ok=True)
     # 已有工单目录不覆盖，重复演示使用 --prepare-demo 之外的新副本或还原任务文件。
     if not (root / "calc.py").exists():

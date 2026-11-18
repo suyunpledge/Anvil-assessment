@@ -257,6 +257,7 @@ class SemanticTest(_Base):
         self.assertTrue(h["ok"])
         self.assertEqual(h["dim"], 1024)
 
+    @unittest.skipUnless(os.environ.get("ANVIL_LIVE_TESTS") == "1", "真实嵌入测试需显式 ANVIL_LIVE_TESTS=1")
     def test_real_embed_available_locally(self) -> None:
         """真打一次本机嵌入（不出网、不花额度）；离线就跳过。"""
         h = ST.health()

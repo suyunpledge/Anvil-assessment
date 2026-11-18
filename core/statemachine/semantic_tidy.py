@@ -17,35 +17,37 @@
 """
 from __future__ import annotations
 
-import json
 import math
 import os
-import urllib.error
-import urllib.request
 from typing import Any, Dict, List, Optional
 
-OLLAMA = "http://127.0.0.1:11434"
+# 保留旧导出供兼容测试使用；实际调用读取统一配置。
 EMBED_MODEL = "bge-m3:latest"
-Opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 #: 低于这个余弦相似度就认为「说不准」（bge-m3 的分离度见 TOOLS.md：无关约 0.5，相关约 0.75+）
 DEFAULT_THRESHOLD = 0.62
 
 
-def embed(texts: List[str], model: str = EMBED_MODEL, timeout: int = 60) -> Optional[List[List[float]]]:
+def embed(texts: List[str], model: Optional[str] = None, timeout: Optional[int] = None) -> Optional[List[List[float]]]:
     """批量取嵌入。失败返回 None（调用方退化成「没有建议」）。"""
     if not texts:
         return []
-    body = json.dumps({"model": model, "input": texts}).encode("utf-8")
-    req = urllib.request.Request(OLLAMA + "/api/embed", data=body,
-                                 headers={"Content-Type": "application/json"})
+    from integration.config import settings
+    from integration.models import invoke
+    from integration.trace import record
+    cfg = settings()
     try:
-        with Opener.open(req, timeout=timeout) as r:
-            j = json.loads(r.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        j = invoke("/api/embed", {"model": model or cfg["models"]["embedding"], "input": texts},
+                   timeout or cfg["limits"]["memory_timeout"])
+    except Exception as exc:
+        record("semantic_degraded", error=str(exc)[:300])
         return None
     vecs = j.get("embeddings")
-    if not isinstance(vecs, list) or len(vecs) != len(texts):
+    if not isinstance(vecs, list) or len(vecs) != len(texts) or any(
+        not isinstance(v, list) or len(v) != cfg["models"]["embedding_dim"]
+        or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in v)
+        or not any(v) for v in vecs
+    ):
         return None
     return vecs
 
@@ -120,5 +122,6 @@ def suggest_categories(files: List[Dict[str, str]], categories: Dict[str, str],
 
 
 def health() -> Dict[str, Any]:
+    from integration.config import settings
     v = embed(["健康检查"])
-    return {"ok": bool(v), "model": EMBED_MODEL, "dim": (len(v[0]) if v else 0)}
+    return {"ok": bool(v), "model": settings()["models"]["embedding"], "dim": (len(v[0]) if v else 0)}

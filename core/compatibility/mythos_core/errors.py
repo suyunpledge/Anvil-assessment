@@ -21,6 +21,10 @@ class ContextOverflow(AdapterError):
     """请求超出上下文配额（R5）。实测：超限直接 400，不静默截断。"""
 
 
+class OutputTruncated(AdapterError):
+    """模型已用完输出预算；不执行半截补丁，也不作为网络故障重试。"""
+
+
 class UnsafeArgument(AdapterError):
     """受控工具的参数命中危险模式（R2）。命中即判死，不回炉重试。"""
 

@@ -32,6 +32,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -73,7 +74,13 @@ except Exception:                                    # 独立运行兜底
 
 OLLAMA = os.environ.get("LOCAL_LLM_OLLAMA", "http://127.0.0.1:11434")
 AUDIT_PATH = os.environ.get("LOCAL_LLM_AUDIT") or runtime_path("audit.jsonl")
-_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Ollama 无需重定向；禁止跳转可避免白名单检查后被引向外网。
+        return None
+
+
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 #: 出网熔断白名单：只放行 loopback 与内网段
 ALLOWED_NETS = (
@@ -173,7 +180,10 @@ def host_allowed(host: str) -> bool:
 
 def assert_url_allowed(url: str) -> None:
     from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+        raise OutboundBlocked("模型地址必须为不含凭据的 HTTP(S) URL")
+    host = (parsed.hostname or "")
     if host == "localhost":
         host = "127.0.0.1"
     if not host_allowed(host):
@@ -217,11 +227,11 @@ def audit(rec: Dict[str, Any]) -> None:
 def read_audit(limit: int = 100) -> list:
     try:
         with open(AUDIT_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            lines = deque(f, maxlen=max(1, min(int(limit), 1000)))
     except OSError:
         return []
     out = []
-    for line in lines[-max(1, int(limit)):]:
+    for line in lines:
         try:
             out.append(json.loads(line))
         except ValueError:
@@ -375,7 +385,7 @@ def ollama_to_openai(resp: Dict[str, Any], model: str) -> Dict[str, Any]:
 # ============================================================
 # 服务
 # ============================================================
-def build_app():
+def build_app(token: Optional[str] = None):
     if not _FASTAPI_OK:
         raise SystemExit("未找到 fastapi；请用带 fastapi/uvicorn 的解释器运行"
                          "（本机 AutoClaw 内嵌 python 自带）")
@@ -388,12 +398,14 @@ def build_app():
     # ------------------------------------------------------------------
     # 定义在 build_app 内部而不是模块级：模块级在缺 fastapi 的 --selfcheck
     # 模式下也要能 import（那时 Header/Depends 是 object，写成默认值会直接炸）。
-    ensure_gateway_token()
+    if token is None:
+        ensure_gateway_token()
 
     async def _require_token(authorization: str = Header(default=""),
                              x_local_ide_token: str = Header(default="")) -> None:
         got = extract_token(authorization, x_local_ide_token)  # type: ignore[misc]
-        if not any(tokens_equal(got, t) for t in accepted_tokens()):  # type: ignore[misc]
+        allowed_tokens = [token] if token is not None else accepted_tokens()
+        if not any(tokens_equal(got, t) for t in allowed_tokens):  # type: ignore[misc]
             raise HTTPException(
                 status_code=401,
                 detail="需要令牌：请在请求头带上 X-Local-Ide-Token"

@@ -36,5 +36,6 @@ micro_bench_result*.json
 *.pt
 .ruff_cache/
 .mypy_cache/
+dist/
 
 .runtime/

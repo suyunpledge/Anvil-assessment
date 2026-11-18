@@ -216,6 +216,9 @@ class WorkOrderStateMachine:
             staging_root = os.path.join(_tf.gettempdir(), "local-ide-staging")
             self._log("暂存区与工作目录嵌套，已改到：%s" % staging_root)
 
+        # CLI 未提供基线时也必须在复制前捕获，不能在提交时跳过版本检查。
+        if self.initial_version is None:
+            self.initial_version = content_version(target_abs)
         # ---- ② 版本基线（工单开始前就记下） ----
         if self.initial_version:
             try:
@@ -233,9 +236,26 @@ class WorkOrderStateMachine:
         dst = os.path.join(staging_root, self.wo.wo_id)
         if os.path.exists(dst):
             shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src, dst, ignore=shutil.ignore_patterns(
+        ignored_names = shutil.ignore_patterns(
             "__pycache__", ".git", "*.pyc", ".sm-work", ".sm-runs",
-            ".runtime", "node_modules", ".venv"))
+            ".runtime", "node_modules", ".venv")
+
+        def ignore_links(folder, names):
+            ignored = set(ignored_names(folder, names))
+            for name in names:
+                path = os.path.join(folder, name)
+                # copytree 默认会解引用链接，导致根外内容被复制进沙箱并变得可读。
+                if os.path.islink(path) or getattr(os.path, "isjunction", lambda p: False)(path):
+                    ignored.add(name)
+            return ignored
+
+        try:
+            shutil.copytree(src, dst, ignore=ignore_links)
+            staged_target = ToolContext(root=dst, target=self.wo.target).resolve(self.wo.target)
+            if content_version(staged_target) != self.initial_version or content_version(target_abs) != self.initial_version:
+                raise Terminal(STATUS_FAILED, "目标文件在暂存复制期间已被修改，请重新建单")
+        except OSError as exc:
+            raise Terminal(STATUS_FAILED, "无法安全暂存项目（链接不会被复制）：%s" % exc) from exc
         self.staging_root = staging_root
         # 留一份原始文件副本，供事后回滚/对照
         with open(target_abs, "r", encoding="utf-8") as f:
@@ -258,7 +278,7 @@ class WorkOrderStateMachine:
 
         授权走两层，都只影响本单：
           1. 引擎层：本实例 _visual_ok=True → _execute_call 的授权集合放开 visual_query；
-          2. 适配器层：ad.profile["node_toolsets"]["recon"/"edit"] 追加 visual_query，
+          2. 适配器层：ad.runtime_toolsets["recon"/"edit"] 追加 visual_query，
              让模型**看得见**这个工具（tools_for 会先查这个覆盖再落画像默认）。
         不动全局 NODE_TOOLSETS / 画像类字段——service 进程里下一个纯代码工单
         的工具面与之前完全一致（v1 教训：模块级突变=进程级污染）。
@@ -408,22 +428,25 @@ class WorkOrderStateMachine:
         # 模型画像可额外挂一段提示（依据实测的脾气）：例如 qwen2.5-coder 不会算行号，
         # 就把它拨回「按原文替换」的写法（依据 S8）。
         hint = getattr(getattr(self.ad, "spec", None), "edit_prompt_hint", "") or ""
+        patch_modes = (
+            "apply_patch 的写法：old_string（逐字匹配、在文件中唯一的原文）+ new_string（替换后的文本）。\n"
+            if getattr(getattr(self.ad, "spec", None), "text_patch_only", False) else
+            "apply_patch 的两种写法（二选一）：\n"
+            "  A) old_string（逐字匹配、在文件中唯一的原文）+ new_string（替换后的文本）；\n"
+            "  B) start_line + end_line（1 起、含端点）+ new_code（替换后的整段代码）。\n"
+        )
         text = (
             head + "\n"
             "唯一允许的修改方式：调用 apply_patch 工具，对 %s 做**最小改动**。\n"
-            "apply_patch 的两种写法（二选一）：\n"
-            "  A) old_string（要被替换的原文，必须与文件中文本逐字一致、在文件中唯一）"
-            "+ new_string（替换后的文本）；\n"
-            "  B) start_line + end_line（1 起、含端点）+ new_code（替换后的整段代码）。\n"
+            + patch_modes +
             "硬规则：\n"
             "1) 只能改 %s 这一个文件，不能改测试文件；\n"
             "2) 禁止整文件重写，禁止顺手重构无关代码；\n"
             "3) 新增或修改的函数必须有完整的参数与返回值类型注解（类型 gate 会检查）；\n"
-            "4) 改动要能通过测试；不确定就先 read_file 看清楚再改；\n"
+            "4) 改动要能通过测试；依据提供的源码生成补丁，不要臆造缺失的内容；\n"
             "5) 不要说「已完成」这类话——完成与否由 gate 判定，你只需产出补丁；\n"
             "6) 改动不能留下不可达代码：旧实现要真删掉，而不是把它留在 return 后面。"
-            % (target, target)
-        )
+        ) % (target, target)
         # ★ 视觉工单特别说明（2026-10-17 实测教训）：模型会把 visual_query 当成
         #   Python 函数直接写进代码（result = visual_query(...)）——它是**对话工具**，
         #   只能在回复里以工具调用形式使用，代码里不存在这个函数。
@@ -448,6 +471,20 @@ class WorkOrderStateMachine:
             listing = execute(ctx, "list_dir", {"path": "."})["listing"]
         except Exception as e:
             listing = "（列表失败：%s）" % e
+        spec = getattr(self.ad, "spec", None)
+        if getattr(spec, "guard_context", False) and self.context_provider is not None:
+            from mythos_core.budget import estimate_request_tokens
+            estimate = estimate_request_tokens([{"role": "user", "content": target_src + listing + self.wo.task}])
+            if estimate > spec.ctx_for("recon") // 2:
+                # 与编辑阶段共用按函数裁剪的上下文；没有目标源码则交给预算预检明确拒绝。
+                try:
+                    pack = self.context_provider(self.wo.task, self.wo.target) or {}
+                except Exception as error:
+                    self._log("侦察上下文裁剪不可用，将由预算预检检查全文：%s" % error)
+                    pack = {}
+                if "target_source" in pack.get("kept", []) and pack.get("text"):
+                    target_src = "（按任务裁剪的源码片段，并非完整文件）\n" + pack["text"]
+                    listing = "（已由源码上下文中的仓库映射替代）"
         visual_hint = ("本单有视觉任务：你可调用 visual_query(image_path, query) 看图。必须获得成功视觉结果再完成修改。\n"
                        if self._visual_ok else "")
         return visual_hint + ("# 任务\n%s\n\n# 沙箱目录（暂存区）\n%s\n\n# 目标文件 %s 的当前内容\n%s\n\n"
@@ -613,6 +650,10 @@ class WorkOrderStateMachine:
             if r.kind == "tool_call":
                 writes = [c for c in r.calls if c["name"] in WRITE_TOOLS]
                 reads = [c for c in r.calls if c["name"] not in WRITE_TOOLS]
+                # 工具结果必须有对应的 assistant 调用，才能被原生工具模板正确承接。
+                messages.append({"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": c["name"], "arguments": c.get("args") or {}}}
+                    for c in reads + writes[:1]]})
                 for c in reads:      # 依据 E7：首轮常常只做第一步（读）
                     try:
                         res = self._execute_call(ctx, c, "edit", turn)
@@ -634,9 +675,18 @@ class WorkOrderStateMachine:
                                   % (res.get("mode"), res.get("added", 0), res.get("removed", 0)))
                         return res
                     except ToolError as e:
-                        messages.append({"role": "user", "content":
-                                         "补丁没有应用成功：%s\n请先 read_file 看清原文，再给出正确补丁。"
-                                         % e})
+                        messages.append({"role": "tool", "name": c["name"], "content": "工具失败：%s" % e})
+                        if getattr(getattr(self.ad, "spec", None), "guard_context", False):
+                            # 小模型只有两轮编辑额度：框架刷新源码，下一轮直接修补锚点。
+                            # 替换旧历史以免重复源码撑满交互窗口；仍保留错误原文。
+                            fresh = self._execute_call(ctx, {"name": "read_file", "args": {"path": self.wo.target}}, "edit", turn)
+                            recon["target_source"] = fresh["text"]
+                            correction = self._user_edit(ctx, recon, "补丁没有应用成功：%s" % e)
+                            messages = [messages[0], {"role": "user", "content": correction +
+                                "\n框架已刷新源码。请直接给出正确的 apply_patch；不要重复读取文件。"}]
+                        else:
+                            messages.append({"role": "user", "content":
+                                             "补丁没有应用成功：%s\n请先 read_file 看清原文，再给出正确补丁。" % e})
                         if isinstance(e, VersionConflict):
                             self.wo.add_violation("edit", "optimistic_concurrency", str(e))
                         # 同一份补丁反复提交（实测 qwen2.5-coder 会这样）：不再浪费轮次
@@ -786,30 +836,19 @@ class WorkOrderStateMachine:
         if not self.commit_enabled:
             self._log("（--no-commit 模式：不落盘）")
             return ""
+        staged = ctx.resolve(self.wo.target)
+        staged_version = content_version(staged)
         if self._test_hook_before_commit is not None:
             try:
                 self._test_hook_before_commit()
             except Exception:
                 pass
-        staged = ctx.resolve(self.wo.target)
-        real = os.path.join(os.path.abspath(self.wo.workdir), self.wo.target.replace("\\", "/"))
-        # 落盘前终检：真实文件必须仍与工单开始时同版本
-        if self.initial_version:
-            try:
-                import tools as _tools
-                now_v = _tools.content_version(real) if os.path.exists(real) else ""
-            except Exception:
-                now_v = ""
-            if now_v and now_v != self.initial_version:
-                raise Terminal(
-                    STATUS_FAILED,
-                    "目标文件在工单运行期间被修改（%s → %s），拒绝覆盖；请重新建单。"
-                    % (self.initial_version[7:15], now_v[7:15]))
-        os.makedirs(os.path.dirname(real), exist_ok=True)
-        tmp = real + ".sm-commit"
-        shutil.copyfile(staged, tmp)
-        os.replace(tmp, real)
-        return real
+        from commit import commit_verified
+        try:
+            return commit_verified(self.wo.workdir, self.wo.target, staged,
+                                   self.initial_version, staged_version)
+        except (OSError, ToolError) as exc:
+            raise Terminal(STATUS_FAILED, str(exc)) from exc
 
     def _finish(self, res: RunResult, t0: float) -> RunResult:
         res.wo.artifacts["elapsed_sec"] = round(time.time() - t0, 2)

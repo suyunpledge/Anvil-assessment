@@ -2,13 +2,31 @@
 
 本地模型驱动的单文件 Python 编码 Agent。工单状态机负责执行与验证，HR 负责项目记忆，SVSG 负责看图和结构化证据。三者的源码、配置、运行目录与日志统一在本仓库；运行时通过 Python 对象调用，无需另外启动 HR、SVSG 或模型网关进程。
 
-## 快速启动
+## 考核入口（3 × 25 分）
 
-本机已经准备 `.venv`、YOLO 权重与公交车演示图片。在本仓库目录运行：
+本项目选择“大模型工程开发”路线。考核材料从 [考核总览](docs/assessment/考核总览.md) 开始：
+
+| 要求 | 材料与操作 |
+|---|---|
+| AI 基础理论学习 25 | [理论与实现](docs/assessment/理论与实现.md)：原理、实现定位、实验、答辩题及本人学习记录 |
+| 大模型工程 / 工作流开发 25 | [工程说明与演示](docs/assessment/工程说明与演示.md)：真实代码工单、验证、确认与失败处理 |
+| 资产复用性 25 | [部署与发布](docs/assessment/部署与发布.md)：全新环境安装、依赖锁、GitHub/Azure DevOps 流水线、源码包与哈希、效果复现 |
+
+已安装测试依赖和 Node 后，一条命令生成可审阅的考核附件：
 
 ```powershell
-.\start.ps1 -Doctor
-.\start.ps1
+.\.venv\Scripts\python.exe scripts/assess.py --live --scope code
+```
+
+输出目录的 `publish/` 包含源码 ZIP、SHA-256、离线和真实模型摘要。`code` 范围只要求代码模型，记忆/视觉会明确记为未测试。离线 CI 不代表真实模型验收；本地产物不代表已发布到平台。三项合计 75 分，不推测其他评分项。
+
+## 快速启动
+
+代码工程主线可独立运行。在本仓库目录运行（首次部署先按下文安装）：
+
+```powershell
+.\start.ps1 -CodeOnly -Doctor
+.\start.ps1 -CodeOnly
 ```
 
 打开 [工作台](http://127.0.0.1:8099/console)，将 `.runtime/service-token` 内容粘贴到右上角。页面从同一端口加载，无需双击 HTML，也无需配置浏览器跨域。令牌只保存在当前浏览器会话中。停止服务用 Ctrl+C。
@@ -17,14 +35,21 @@
 
 ## 在其他机器复现
 
-要求 Python 3.12、Ollama、本地磁盘空间和能运行 9B/7B 模型的内存。显存不足时可以回落 CPU，速度以机器实测为准。
+主线要求 Windows x64、Python 3.12、Ollama、本地磁盘空间和能运行配置模型的内存。显存不足时可以回落 CPU，速度以机器实测为准。完整的安装、离线资源、回退和排障见 [部署与发布](docs/assessment/部署与发布.md)。
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-ollama pull qwen3.5:9b
+.\deploy\bootstrap.ps1 -Profile code
+ollama pull qwen2.5-coder:7b
+.\start.ps1 -CodeOnly -Doctor
+```
+
+安装 `test` 档位后可跑全部离线回归。需要演示记忆和视觉时再准备完整资源：
+
+```powershell
+.\deploy\bootstrap.ps1 -Profile full
 ollama pull qwen2.5vl:7b
 ollama pull bge-m3
+Remove-Item Env:ANVIL_HR -ErrorAction SilentlyContinue
 ```
 
 准备已获使用许可的 YOLOv8n 权重到 `.runtime/models/yolov8n.pt`；可在 `anvil.toml` 的 `vision.weights` 指定其他本地路径。不会隐式下载权重或使用演示检测桩冒充真实检测。YOLO/Ultralytics 及其权重的许可证须按实际分发方式核对，详情见 `vendor/NOTICE.md`。
@@ -56,7 +81,7 @@ flowchart LR
     M --> O[本地 Ollama :11434]
 ```
 
-代码模型默认 `qwen3.5:9b`，视觉及低置信区域复核模型默认 `qwen2.5vl:7b`，嵌入模型默认 `bge-m3:latest`。所有模型调用使用禁系统代理的统一传输、网关出网检查与审计。模型 HTTP 接口也挂载在 `/model`，便于外部客户端复用。
+代码模型默认 `qwen2.5-coder:7b`，适配器为 `qwen-coder`；视觉及低置信区域复核模型默认 `qwen2.5vl:7b`，嵌入模型默认 `bge-m3:latest`，以 `anvil.toml` 为准。所有模型调用使用禁系统代理的统一传输、网关出网检查与审计。模型 HTTP 接口也挂载在 `/model`，便于外部客户端复用。
 
 ### 上下文与记忆
 
@@ -82,7 +107,7 @@ flowchart LR
 | HR retrieve | 项目、任务、目标名 | 关键句和关联全文；失败返回空记忆并留痕 |
 | read_file / list_dir / search_code | 沙箱相对路径或搜索模式 | 带版本的文本、目录、命中位置 |
 | visual_query | `image_path`, `query` | `status`, `claims`, `trace_id`, 复审信息；失败为工具错误 |
-| edit / apply_patch | 任务、代码、历史、工具反馈 | 最小补丁，只写声明的目标；Qwen3.5 只暴露原文替换契约，避免错误行号破坏相邻函数 |
+| edit / apply_patch | 任务、代码、历史、工具反馈 | 最小补丁，只写声明的目标；适配器按模型能力提供受控补丁契约 |
 | syntax / type / test gate | 暂存源码、测试入口 | 程序化结果；失败回 edit，反复失败后刷新 recon，预算耗尽转人审 |
 | confirm | 工单 ID，可选 `approve` | 比对原文件及暂存版本后原子落盘；`approve=false` 与 cancel 均不会落盘 |
 | memory outbox | 已确认任务、验证摘要、变更摘要 | 项目知识入库；故障保留队列供重试 |
@@ -97,6 +122,9 @@ flowchart LR
 
 # 真实 HTTP、本地代码模型、三道 gate、确认、记忆入库和下张工单召回
 .\.venv\Scripts\python.exe scripts/integration_e2e.py
+
+# 仅代码主线：无需嵌入、视觉模型或 YOLO 权重
+.\.venv\Scripts\python.exe scripts/integration_e2e.py --scope code
 
 # 加入真实视觉工单
 .\.venv\Scripts\python.exe scripts/integration_e2e.py --vision-image C:\你的素材\bus.jpg
@@ -124,7 +152,11 @@ pushd vendor\vision; ..\..\.venv\Scripts\python.exe -m pytest tests -q; popd
 | `POST /memory/retry` | 异步重试待入库记忆 |
 | `POST /model/v1/chat/completions` | 对外模型接口 |
 
-配置文件 `anvil.toml` 是模型与资源限制的主入口。默认每单最多 16 次代码模型槽位调用、2 次视觉工具请求；每次视觉请求最多 1 次区域复核 + 2 次回答生成；单次生成上限 2048 token。代码/记忆/视觉请求超时分别为 180/60/120 秒，区域复核预算为视觉预算的 1/4，图片上限 16 MiB。代码槽位的网络重试关闭，故障由状态机显式处理。
+配置文件 `anvil.toml` 是模型与资源限制的主入口。默认每单最多 16 次代码/整理模型调用、2 次视觉工具请求；每次视觉请求最多 1 次区域复核 + 2 次回答生成，并在此前发出一次空提示加载请求；单次生成上限 2048 token。代码/记忆/视觉请求超时分别为 180/120/120 秒，区域复核预算为视觉预算的 1/4，图片上限 16 MiB。代码槽位的网络重试关闭，故障由状态机显式处理。
+
+后端默认最多 4 张运行工单、100 张保留工单；超额建单返回 429。SSE 支持独立订阅与断线续读；记忆失败在后台退避重试。接口约定、后端专用检查命令和生命周期边界见 [后端架构审查](docs/后端架构审查-2026-10-18.md)。
+
+工单注册表现在由应用实例持有；SSE 使用事件通知代替定时轮询，关闭时通过独立停止信号和限时等待避免提交锁阻塞。实现说明、Python 接入迁移与事件分发微基准见 [后端运行时优化](docs/后端运行时优化-2026-11-04.md)。
 
 本地 Ollama 不产生按 token 付费的 API 账单；硬件、电力和耗时并非零成本。每次调用记录实际 `prompt_eval_count`、`eval_count` 和耗时，演示时以报告中的实测值为准。上述是调用及输出上限，并非整张工单的硬实时截止时间；模型输入和推理速度仍取决于任务与硬件。
 

@@ -146,8 +146,10 @@ class IntegrationTests(unittest.TestCase):
     def test_hr_real_storage_project_isolation_and_cache(self):
         import numpy as np
 
-        def embed(*args):
-            return {"embedding": np.ones(1024).tolist()}
+        def embed(path, payload, *args):
+            vector = np.ones(1024).tolist()
+            return ({"embeddings": [vector for _ in payload["input"]]} if path == "/api/embed"
+                    else {"embedding": vector})
 
         with mockpatch("integration.memory.invoke", side_effect=embed) as calls:
             with memory._lock:
@@ -167,7 +169,9 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(memory.flush()["pending"], 1)
         pending = self.root / "runtime" / "memory-outbox" / item
         self.assertTrue(pending.exists())
-        with mockpatch("integration.memory.invoke", return_value={"embedding": [1.0] * 1024}):
+        with mockpatch("integration.memory.invoke", side_effect=lambda path, payload, *a:
+                       {"embeddings": [[1.0] * 1024 for _ in payload["input"]]} if path == "/api/embed"
+                       else {"embedding": [1.0] * 1024}):
             self.assertEqual(memory.flush()["written"], 1)
         self.assertFalse(pending.exists())
 
@@ -226,12 +230,12 @@ class IntegrationTests(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         from anvil import build_app
-        from service.app import _TOKEN, REGISTRY
+        from service.app import _TOKEN
 
         runner = self.runner()
-        REGISTRY.add(runner)
         with mockpatch("integration.memory.start_worker"):
             app = build_app()
+        app.state.registry.add(runner)
         response = TestClient(app).post(
             "/wo/%s/confirm" % runner.wo_id, headers={"X-Local-Ide-Token": _TOKEN}, json={"approve": False}
         )

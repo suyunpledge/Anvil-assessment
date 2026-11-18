@@ -1,0 +1,25 @@
+# Azure DevOps Services. Models are tested separately on the deployment machine.
+trigger:
+  branches:
+    include: [assessment, master]
+pool:
+  vmImage: windows-2022
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '22.x'
+  - powershell: |
+      python -m pip install --only-binary=:all: -r deploy/requirements-windows-py312-test.lock
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      python -m pip check
+    displayName: Install locked test dependencies
+  - powershell: python scripts/assess.py --output .runtime/ci
+    displayName: Verify and package
+  - task: PublishPipelineArtifact@1
+    condition: succeededOrFailed()
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)/.runtime/ci/publish'
+      artifact: Anvil-assessment

@@ -16,14 +16,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 
 SUITES = [
+    ("考核资源检查与交付包", ["scripts/tests/test_assessment.py"]),
+    ("模型调度与排队取消", ["integration/tests/test_scheduler.py"]),
+    ("运行时隔离与事件通知", ["service/tests/test_runtime_isolation.py"]),
+    ("后端并发与生命周期", ["service/tests/test_backend_runtime.py"]),
     ("原生集成与故障回归", ["integration/tests/test_integration.py"]),
     ("网关单测", ["gateway/tests/test_gateway.py"]),
     ("网关鉴权（1005 补齐）", ["gateway/tests/test_gateway_auth.py"]),
@@ -39,8 +47,10 @@ SUITES = [
 # 它们被 scripts/e2e_check.py / service/tests/cancel_concurrency.py 独立处理
 
 CORE_SUITES = [
+    ("核心·Qwen 默认链路与预算", ["integration/tests/test_qwen_adaptation.py"]),
     ("核心·状态机", ["core/statemachine/test_statemachine.py"]),
     ("核心·文件整理", ["core/statemachine/test_tidy.py"]),
+    ("核心·上下文与语义整理优化", ["core/statemachine/test_optimizations.py"]),
     ("核心·Mythos 适配层", ["core/compatibility/test_mythos_adapter.py"]),
     ("核心·Qwen2.5-Coder 适配层", ["core/compatibility/test_qwen_coder_adapter.py"]),
     ("核心·GLM4 适配层", ["core/compatibility/test_glm4_adapter.py"]),
@@ -60,16 +70,21 @@ def run_py(path: str) -> tuple:
         " os.path.join(root, 'core', 'compatibility')) if p not in sys.path];"
         "runpy.run_path(%r, run_name='__main__')"
     ) % (path, path)
-    p = subprocess.run([sys.executable, "-c", code],
-                       cwd=_ROOT, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace")
+    # 每个套件隔离运行目录，防止回归覆盖正在演示的服务令牌、日志或记忆。
+    with tempfile.TemporaryDirectory(prefix="anvil-selftest-") as runtime:
+        env = {**os.environ, "LOCAL_IDE_RUNTIME": runtime,
+               "ANVIL_INTEGRATION_LOG_DIR": os.path.join(runtime, "integration-log"),
+               "LOCAL_LLM_AUDIT": os.path.join(runtime, "audit.jsonl")}
+        p = subprocess.run([sys.executable, "-c", code],
+                           cwd=_ROOT, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env)
     tail = ((p.stdout or "") + (p.stderr or "")).strip().split("\n")
     summary = ""
     for line in reversed(tail):
         if line.startswith(("Ran ", "OK", "FAILED", "合计")):
             summary = line.strip()
             break
-    return p.returncode == 0, summary
+    return p.returncode == 0, summary if p.returncode == 0 else "\n".join(tail[-18:])
 
 
 def run_node(rel: str) -> tuple:
@@ -93,7 +108,10 @@ def main(argv=None) -> int:
     os.environ["ANVIL_HR"] = "0"
     ap = argparse.ArgumentParser(description="本地 IDE 离线自检")
     ap.add_argument("--core", action="store_true", help="一并跑核心回归")
+    ap.add_argument("--backend-only", action="store_true", help="只检查后端，跳过扩展检查")
+    ap.add_argument("--json", type=Path, help="保存机器可读结果（不会省略失败/跳过摘要）")
     args = ap.parse_args(argv)
+    started = time.monotonic()
 
     suites = list(SUITES)
     if args.core:
@@ -107,11 +125,21 @@ def main(argv=None) -> int:
             results.append((name, ok, summary))
             print("  [%s] %-22s %s" % ("PASS" if ok else "FAIL", name, summary))
 
-    ok, summary = run_node("extension/tests/check.js")
-    results.append(("扩展静态检查", ok, summary))
-    print("  [%s] %-22s %s" % ("PASS" if ok else "FAIL", "扩展静态检查", summary))
+    if not args.backend_only:
+        ok, summary = run_node("extension/tests/check.js")
+        results.append(("扩展静态检查", ok, summary))
+        print("  [%s] %-22s %s" % ("PASS" if ok else "FAIL", "扩展静态检查", summary))
 
     bad = [r for r in results if not r[1]]
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps({
+            "ok": not bad, "mode": "offline-scripted-model", "core": args.core,
+            "elapsed_sec": round(time.monotonic() - started, 3),
+            "suite_count": len(results), "passed_suites": len(results) - len(bad),
+            "suites": [{"name": name, "ok": ok, "summary": summary}
+                       for name, ok, summary in results],
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("\n合计：%d/%d 通过%s" % (len(results) - len(bad), len(results),
                                    "  ✓" if not bad else "  ✗"))
     for name, _, summary in bad:

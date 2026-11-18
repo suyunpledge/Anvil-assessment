@@ -14,12 +14,13 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-import winjob
+import winjob  # noqa: E402
 
 
 @unittest.skipUnless(winjob.IS_AVAILABLE, "winjob 仅 Windows")
@@ -46,11 +47,22 @@ class WinJobTest(unittest.TestCase):
         self.assertNotEqual(r["proc"].returncode, 0, "内存超限应非零退出")
 
     def test_probe_reports_reachability_honestly(self) -> None:
-        """探针地址是真实公网（223.5.5.5:53）——可达就如实报可达。"""
+        """可达的探针结果必须拒绝宣称网络隔离；离线回归不依赖公网状态。"""
+        proc = Mock(returncode=3)
+        proc.communicate.return_value = (b"OPEN\n", None)
+        ok, why = winjob.probe_network_blocked(
+            lambda c, w, e: {"proc": proc, "job": None}, self.wd, dict(os.environ))
+        self.assertFalse(ok, why)
+        self.assertIn("可达", why)
+
+    @unittest.skipUnless(os.environ.get("ANVIL_LIVE_TESTS") == "1", "真实公网探针需 ANVIL_LIVE_TESTS=1")
+    def test_live_probe_reports_reachability(self) -> None:
+        """真实公网探针独立运行；地址不可达不能证明网络隔离。"""
         ok, why = winjob.probe_network_blocked(
             lambda c, w, e: winjob.launch_isolated(c, w, e),
             self.wd, dict(os.environ))
-        # 无防火墙拦截的机器上网络必然可达；探针必须诚实报告 False（没挡住）
+        if ok:
+            self.skipTest("公网探针不可达，无法验证可达分支；不构成网络隔离证明：" + why)
         self.assertFalse(ok, why)
         self.assertIn("可达", why)
 

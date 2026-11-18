@@ -17,7 +17,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Tuple
 
 from .config import (
@@ -49,6 +49,9 @@ class ModelProfile:
     transport_retries: int = TRANSPORT_RETRIES_DEFAULT
     notes: str = ""
     evidence: Tuple[str, ...] = field(default_factory=tuple)
+    text_patch_only: bool = False
+    keep_alive: str = ""
+    guard_context: bool = False
 
     # ---- 便捷视图 ----
     def think_for(self, node_kind: str) -> bool:
@@ -84,7 +87,7 @@ MYTHOS = ModelProfile(
 )
 
 # ============================================================
-# Qwen2.5-Coder-7B —— 本轮新做（它的工具调用走正文 JSON，不是原生通道）
+# Qwen2.5-Coder-7B —— 原生工具通道优先，兼容正文 JSON
 #   依据：probes/model_smoke.py（2026-09-27）+ probes/probe_qwen_coder.py
 # ============================================================
 QWEN_CODER = ModelProfile(
@@ -95,11 +98,16 @@ QWEN_CODER = ModelProfile(
     toolsets=dict(TOOLSETS),
     # 它**不支持思考**：Ollama 直接 400 `does not support thinking`（实测 Q3）
     think_policy={k: False for k in THINK_POLICY},
-    ctx_policy=dict(CTX_POLICY),
-    ctx_default=CTX_DEFAULT,
+    # 交互配置：各节点固定 8K，避免继承 Mythos 的 16K KV cache 配额。
+    # 模型标称上限仍为 32K；更长请求需显式指定并通过预算检查。
+    ctx_policy={k: 8192 for k in CTX_POLICY},
+    ctx_default=8192,
     ctx_max=32768,
-    ctx_interactive_max=CTX_INTERACTIVE_MAX,
-    temp_ladder=list(TEMP_LADDER),
+    ctx_interactive_max=8192,
+    temp_ladder=[0.0, 0.2, 0.4],
+    text_patch_only=True,
+    keep_alive="10m",
+    guard_context=True,
     sends_think=False,        # ★ 关键：不能把 think 键发出去
     extract_from_content=True,  # ★ 关键：工具调用出现在正文里，必须自己抠
     # ★ 依据 S7/S8（wo-qwencoder-01/03 真机跑）：
@@ -108,9 +116,14 @@ QWEN_CODER = ModelProfile(
     recon_max_turns=1,
     edit_max_turns=2,
     # 它不会「行号心算」（无 thinking）：把锚点从行号拨回文本，这是实测里唯一稳的写法。
-    edit_prompt_hint=('★ 本机模型特别说明（依据实测）：你曾连续多轮把「def 行」多加缩进导致语法错误，\n且你在行号计算上不可靠——**禁止使用行号模式**（不要用 start_line/end_line）。\n必须用 old_string + new_string 的按原文替换写法：把要改的那一段逐字原样抄进 old_string（含缩进），\n把替换后的新内容放进 new_string（新内容按它在文件里的正确缩进写，顶格的 def 不要缩进）。\n示例：\n{"name": "apply_patch", "arguments": {"path": "calc.py", "old_string": "    raise NotImplementedError(\\"待实现\\")", "new_string": "    if not nums:\\n        return 0.0\\n    return sum(nums) / len(nums)"}}\n不要动目标函数以外的任何一行。'),
-    notes="不走原生 tool_calls 通道，把调用写成正文裸 JSON；不支持 thinking；"
-          "参数写法比 qwen3 系更贴近「只给需要改的那一段」。",
+    edit_prompt_hint=(
+        "只调用 apply_patch，使用 path、old_string、new_string。old_string 必须逐字匹配且唯一。\n"
+        "选择尽量短的唯一文本锚点；只改文档时，优先替换引号内部的文字，不要连带三引号。\n"
+        "参数是 JSON 字符串：换行和双引号必须正确转义，不能使用 Python 三引号包裹参数。\n"
+        "代码替换保留原缩进，顶格的 def 不增加缩进。禁止行号模式，禁止修改无关函数。\n"
+        '格式示例：{"name":"apply_patch","arguments":{"path":"calc.py",'
+        '"old_string":"旧说明文字","new_string":"新说明文字"}}'),
+    notes="原生 tool_calls 优先，兼容正文 JSON；不发送 think；8K 交互窗口，文本锚点补丁，驻留 10 分钟。",
     evidence=("S1 带 tools 时仍返回 content 里的 {\"name\":...,\"arguments\":{...}}",
               "S2 format+tools 同样丢工具通道", "S3 think=true → HTTP 400 does not support thinking",
               "S4/S5 同时给 write_file 与 apply_patch 时仍选 apply_patch（与提示一致）",
@@ -119,8 +132,22 @@ QWEN_CODER = ModelProfile(
               "S8 行号会算错、拿到反馈后重复提交同一补丁 → 改用文本锚点提示 + 缩轮次"),
 )
 
-ALL_PROFILES: Dict[str, ModelProfile] = {p.key: p for p in (MYTHOS, QWEN_CODER)}
-PROFILE_BY_MODEL: Dict[str, str] = {p.model: p.key for p in (MYTHOS, QWEN_CODER)}
+ANVIL_QWEN_CODER = replace(
+    QWEN_CODER,
+    key="anvil-qwen-coder",
+    label="Qwen2.5-Coder-7B · Anvil 微调（试验）",
+    model="anvil-qwen-coder:7b-v1",
+    edit_prompt_hint=QWEN_CODER.edit_prompt_hint + (
+        "\n需求和源码完整时，唯一回复是一条 apply_patch 工具调用，不要复述提示、输出整份代码或解释。"
+        "确实缺少业务规则时，只问一个具体问题，不调用工具。"
+    ),
+    notes="本地 LoRA 试验版，训练集中为 Python 编辑样例。使用独立画像与 8K 上下文。",
+    evidence=("2026-11-11 Ollama 留出对照：同提示下基础版 4/8，微调版 5/8",
+              "实际工单带侦察结论时曾复述源码；补充单一调用约束后同输入产出合法补丁"),
+)
+
+ALL_PROFILES: Dict[str, ModelProfile] = {p.key: p for p in (MYTHOS, QWEN_CODER, ANVIL_QWEN_CODER)}
+PROFILE_BY_MODEL: Dict[str, str] = {p.model: p.key for p in (MYTHOS, QWEN_CODER, ANVIL_QWEN_CODER)}
 
 
 # ============================================================
@@ -253,6 +280,7 @@ QWEN35 = ModelProfile(
     temp_ladder=list(TEMP_LADDER),
     sends_think=True,
     extract_from_content=False,
+    text_patch_only=True,
     # ★ edit 关思考的依据（2026-10-17 e2e 暴露 + T4 实测）：
     #   e2e 首跑 edit 节点 think=True 单轮 141s（9b 模型显存溢出 CPU，思考链长）；
     #   T4 对照 think=False：14.4s，apply_patch 参数逐字正确（old_string 精准）。

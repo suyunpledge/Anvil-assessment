@@ -64,7 +64,7 @@ class StagedAuthTest(unittest.TestCase):
                             adapter=ad)
         r.start()
         r.join(30)
-        self.svc.REGISTRY.add(r)
+        self.app.state.registry.add(r)
         token = os.environ.get("LOCAL_IDE_TOKEN", "")
         if not token:
             # build_app 在无环境变量时会生成随机令牌；从令牌文件读
@@ -105,7 +105,7 @@ class AutoApplyVersionCheckTest(unittest.TestCase):
     def test_autoapply_blocked_when_file_changed(self) -> None:
         res, target = self._run(mutate_during=True)
         self.assertEqual(res.status, "failed")
-        self.assertIn("运行期间被修改", res.error)
+        self.assertIn("已被修改", res.error)
         with open(target, encoding="utf-8") as f:
             content = f.read()
         self.assertIn("运行期间被旁路改的一行", content, "人工改动必须保留")

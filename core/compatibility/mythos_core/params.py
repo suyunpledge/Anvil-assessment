@@ -139,7 +139,9 @@ def normalize_args(raw_args: Any, tool_schema: Dict[str, Any]) -> Dict[str, Any]
 
     out = {k: _coerce(v, props.get(k, {})) for k, v in raw_args.items()}
 
-    missing = [r for r in required if r not in out or out[r] in ("", None)]
+    # 显式允许空字符串的字段仍须提供，例如 new_string="" 表示删除原文。
+    missing = [r for r in required if r not in out or out[r] is None
+               or (out[r] == "" and props.get(r, {}).get("minLength") != 0)]
     if missing:
         raise SchemaViolation("缺少必填参数：%s" % ", ".join(missing))
     return out

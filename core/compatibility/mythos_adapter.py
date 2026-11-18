@@ -49,8 +49,9 @@ try:  # 常规：作为顶层模块 import（sys.path 里有 compatibility/）
         TEMP_LADDER, THINK_POLICY, MAX_SEC_SAMPLES,
     )
     from mythos_core.errors import (
-        AdapterError, ContextOverflow, UnsafeArgument, SchemaViolation,
+        AdapterError, ContextOverflow, OutputTruncated, UnsafeArgument, SchemaViolation,
     )
+    from mythos_core.budget import estimate_request_tokens
     from mythos_core.rules import (
         TOOLSETS, GATED_TOOLS, DESTRUCTIVE_PATTERNS, check_safety,
     )
@@ -67,8 +68,9 @@ except ImportError:  # 作为包内模块 import（例如 import compatibility.m
         TEMP_LADDER, THINK_POLICY, MAX_SEC_SAMPLES,
     )
     from .mythos_core.errors import (
-        AdapterError, ContextOverflow, UnsafeArgument, SchemaViolation,
+        AdapterError, ContextOverflow, OutputTruncated, UnsafeArgument, SchemaViolation,
     )
+    from .mythos_core.budget import estimate_request_tokens
     from .mythos_core.rules import (
         TOOLSETS, GATED_TOOLS, DESTRUCTIVE_PATTERNS, check_safety,
     )
@@ -285,8 +287,8 @@ class MythosAdapter:
         else:
             mix = list(node_or_list)
         selected = [registry[n] for n in mix if n in registry]
-        if self.spec.key == "qwen3.5":
-            # 真机回归：9B 会算错无行号源码的位置，并误删相邻函数。
+        if self.spec.text_patch_only:
+            # Qwen Coder/3.5 使用文本锚点，避免估算行号误改相邻函数。
             # 仅收窄本模型看到的补丁契约，其他模型与全局 registry 保持原样。
             import copy
             selected = copy.deepcopy(selected)
@@ -297,6 +299,8 @@ class MythosAdapter:
                     parameters["properties"] = {key: value for key, value in parameters["properties"].items()
                                                 if key in ("path", "old_string", "new_string", "expected_version")}
                     parameters["required"] = ["path", "old_string", "new_string"]
+                    if "new_string" in parameters["properties"]:
+                        parameters["properties"]["new_string"]["minLength"] = 0
                     fn["description"] = "按原文做一次最小替换：old_string须逐字匹配目标源码；new_string为新内容。不要改目标函数以外的内容。"
         return selected
 
@@ -356,8 +360,16 @@ class MythosAdapter:
         }
         if tools:
             body["tools"] = tools
-        if getattr(self, "max_output_tokens", None):
-            body["options"]["num_predict"] = int(self.max_output_tokens)
+        output_tokens = getattr(self, "max_output_tokens", None) or (2048 if self.spec.guard_context else None)
+        if output_tokens:
+            body["options"]["num_predict"] = int(output_tokens)
+        if self.spec.keep_alive:
+            body["keep_alive"] = self.spec.keep_alive
+        if self.spec.guard_context:
+            estimated = estimate_request_tokens(messages, tools)
+            if estimated + int(output_tokens or 0) > num_ctx:
+                raise ContextOverflow("请求估计 %d token，输出预留 %d，超过窗口 %d；请缩小目标函数或上下文。"
+                                      % (estimated, output_tokens or 0, num_ctx))
         # ★ sends_think=False 的模型（如 qwen2.5-coder）传 think 会直接 HTTP 400，
         #   这一层就把键摘掉，而不是指望调用方记得别传。
         if think is not None and self.spec.sends_think:
@@ -365,7 +377,10 @@ class MythosAdapter:
         # ★ R6（依据 E6）：format 与 tools 绝不同时出现。本函数不提供 format 入口。
         if "format" in body:
             raise AdapterError("内部错误：format 与 tools 不得共存（R6）")
-        return self.transport.chat(body, timeout=timeout)
+        response, elapsed = self.transport.chat(body, timeout=timeout)
+        if response.get("done_reason") == "length":
+            raise OutputTruncated("模型输出达到 token 上限，已拒绝不完整补丁；请拆分改动或提高输出预算。")
+        return response, elapsed
 
     @staticmethod
     def _backoff(n: int) -> float:
@@ -429,6 +444,9 @@ class MythosAdapter:
             except ContextOverflow as e:
                 # 确定性失败：不重试（R5）
                 return FillResult(node=node, ok=False, kind="context_overflow",
+                                  error=str(e), attempts=http_calls, temp=t, ctx=ctx)
+            except OutputTruncated as e:
+                return FillResult(node=node, ok=False, kind="exhausted",
                                   error=str(e), attempts=http_calls, temp=t, ctx=ctx)
             except AdapterError as e:
                 # 网络级抖动：有限重试（不占模型采样额度），用尽才判 transport_error
@@ -501,7 +519,7 @@ class MythosAdapter:
                                           calls=[], sec=sec, attempts=http_calls, temp=t, ctx=ctx)
                     errs.append("未知工具：%s" % name)
                     continue
-                schema = registry.get(name)
+                schema = next((tool for tool in tools if tool["function"]["name"] == name), None)
                 if not schema:
                     errs.append("未知工具：%s" % name)   # 依据 E9
                     continue
@@ -538,7 +556,7 @@ class MythosAdapter:
         self,
         messages: List[Dict[str, Any]],
         think: bool = False,
-        num_ctx: int = CTX_DEFAULT,
+        num_ctx: Optional[int] = None,
         temp: float = 0.0,
         timeout: Optional[float] = REQUEST_TIMEOUT_DEFAULT,
     ) -> FillResult:
@@ -549,6 +567,9 @@ class MythosAdapter:
                                  temp=temp, num_ctx=ctx, timeout=timeout)
         except ContextOverflow as e:
             return FillResult(node="ask", ok=False, kind="context_overflow",
+                              error=str(e), attempts=1, temp=temp, ctx=ctx)
+        except OutputTruncated as e:
+            return FillResult(node="ask", ok=False, kind="exhausted",
                               error=str(e), attempts=1, temp=temp, ctx=ctx)
         except AdapterError as e:
             return FillResult(node="ask", ok=False, kind="transport_error",
@@ -566,9 +587,9 @@ class MythosAdapter:
         try:
             tags = self.transport.list_models()
             names = [m.get("name") for m in tags.get("models", [])]
-            want_base = self.model.split(":")[0]
-            present = self.model in names or any(
-                n and n.split(":")[0] == want_base for n in names)
+            # 不允许把另一个量化/参数规模的同系列模型当作当前模型已安装。
+            canonical = lambda name: name if ":" in name else name + ":latest"
+            present = canonical(self.model) in {canonical(n) for n in names if isinstance(n, str)}
             return {"ok": present, "present": names, "want": self.model}
         except Exception as e:
             return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}

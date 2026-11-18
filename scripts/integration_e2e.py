@@ -5,6 +5,8 @@ python scripts/integration_e2e.py [--vision-image 本地公交车图片路径]
 """
 
 import argparse
+import ast
+import hashlib
 import json
 import os
 import secrets
@@ -22,13 +24,20 @@ from core.paths import ensure_core_on_path
 
 ensure_core_on_path()
 from fake_adapter import make_sandbox
+from sandbox import sanitized_env
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vision-image", default="")
+    parser.add_argument("--scope", choices=("code", "memory", "full"), default="memory")
+    parser.add_argument("--output", type=Path, help="新的报告目录；存在时拒绝覆盖")
     args = parser.parse_args()
-    runroot = ROOT / ".runtime" / "acceptance" / uuid.uuid4().hex[:10]
+    if args.vision_image:
+        args.scope = "full"
+    if args.scope == "full" and not args.vision_image:
+        parser.error("full 验收必须传 --vision-image")
+    runroot = (args.output or ROOT / ".runtime" / "acceptance" / uuid.uuid4().hex[:10]).resolve()
     runroot.mkdir(parents=True)
     project = runroot / "project"
     make_sandbox(str(project))
@@ -43,7 +52,7 @@ def main():
         "LOCAL_IDE_RUNTIME": str(runroot / "runtime"),
         "LOCAL_IDE_TOKEN": token,
         "LOCAL_LLM_VIA": "native",
-        "ANVIL_HR": "1",
+        "ANVIL_HR": "0" if args.scope == "code" else "1",
         "ANVIL_INTEGRATION_LOG_DIR": str(runroot / "records"),
         "PYTHONUNBUFFERED": "1",
     }
@@ -89,7 +98,9 @@ def main():
         request("/wo/" + wo + "/cancel", {})
         raise TimeoutError("工单超过 420 秒")
 
-    report = {"started": time.time(), "checks": {}}
+    report = {"started": time.time(), "mode": "live-model", "scope": args.scope,
+              "checks": {}, "not_tested": (["memory", "vision"] if args.scope == "code"
+                                           else ["vision"] if args.scope == "memory" else [])}
     with (runroot / "server.log").open("w", encoding="utf-8") as logfile:
         process = subprocess.Popen(
             [sys.executable, str(ROOT / "anvil.py"), "--port", str(port)],
@@ -100,7 +111,7 @@ def main():
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         try:
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 60
             while True:
                 try:
                     request("/health")
@@ -109,46 +120,76 @@ def main():
                     if time.monotonic() > deadline or process.poll() is not None:
                         raise RuntimeError("服务未启动；查看 " + str(runroot / "server.log"))
                     time.sleep(0.25)
-            doctor = request("/integrations")
+            doctor = request("/integrations?scope=" + args.scope)
             report["doctor"] = doctor
             assert doctor["ok"], doctor
             original = (project / "calc.py").read_bytes()
+            tests_before = (project / "test_calc.py").read_bytes()
             wo, state = workorder(
                 "在 calc.py 实现 average(nums)：空列表返回0.0，否则返回平均值。替换原函数体，不要留下旧实现。只做最小补丁。"
             )
             assert (project / "calc.py").read_bytes() == original
+            report["checks"]["unconfirmed_source_unchanged"] = True
+            gates = state.get("gates", [])
+            report["gates"] = gates
+            for name in ("gate_syntax", "gate_type", "gate_test"):
+                matching = [gate for gate in gates if gate.get("gate") == name]
+                assert matching and matching[-1]["ok"], (name, gates)
             assert request("/wo/" + wo + "/confirm", {})["ok"]
+            assert request("/wo/" + wo)["status"] == "done"
             assert (project / "calc.py").read_bytes() != original
+            assert (project / "test_calc.py").read_bytes() == tests_before
+            def other_functions(source):
+                return {node.name: ast.dump(node) for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name != "average"}
+            assert other_functions(original) == other_functions((project / "calc.py").read_bytes())
+            # 独立于模型可见测试的边界值；在子进程中运行，不在验收进程加载生成代码。
+            validation = subprocess.run(
+                [sys.executable, "-c", "from calc import average; "
+                 "assert average([]) == 0.0; assert average([-4, 0, 4]) == 0.0; "
+                 "assert average([7]) == 7.0; assert average([1, 2]) == 1.5; "
+                 "assert average([-5, -1]) == -3.0"],
+                cwd=project, env=sanitized_env(home=str(project)),
+                capture_output=True, text=True, timeout=30,
+                encoding="utf-8", errors="replace")
+            assert validation.returncode == 0, validation.stderr
+            report["checks"]["independent_edge_cases"] = 5
+            report["checks"]["tests_and_other_functions_unchanged"] = True
+            report["source_sha256"] = hashlib.sha256((project / "calc.py").read_bytes()).hexdigest()
             report["checks"]["code_confirm_and_gates"] = wo
-            deadline = time.monotonic() + 120
-            while time.monotonic() < deadline:
-                records = request("/wo/" + wo + "/records")["items"]
-                if any(item["kind"] == "memory_ingested" for item in records):
-                    break
-                time.sleep(1)
-            else:
-                raise RuntimeError("记忆未在120秒内完成入库")
-            report["checks"]["memory_ingested"] = True
-            print("HR 成功入库", flush=True)
-            wo2, _ = workorder(
-                "在 calc.py 将 average 的文档字符串改为：返回列表的算术平均值，空列表结果固定为0.0。这段文字与旧文档不同，请逐字替换文档字符串。保持逻辑与类型注解不变，确保测试通过。参考已确认的平均值任务记录。"
-            )
-            records = request("/wo/" + wo2 + "/records")["items"]
-            assert any(item["kind"] == "hr_retrieve" and item.get("hits") for item in records)
-            assert any(
-                item["kind"] == "context" and "项目记忆" in json.dumps(item, ensure_ascii=False)
-                for item in records
-            )
-            request("/wo/" + wo2 + "/cancel", {})
-            report["checks"]["memory_recalled_into_context"] = wo2
-            print("HR 已召回并进入模型上下文", flush=True)
+            report["code_records"] = request("/wo/" + wo + "/records")["items"]
+            if args.scope != "code":
+                # 留出首次请求、一次退避重试及正常批量入库的时间，仍有明确验收截止线。
+                memory_wait = doctor["limits"]["memory_timeout"] * 3 + 45
+                deadline = time.monotonic() + memory_wait
+                while time.monotonic() < deadline:
+                    records = request("/wo/" + wo + "/records")["items"]
+                    if any(item["kind"] == "memory_ingested" for item in records):
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError("记忆未在%d秒内完成入库" % memory_wait)
+                report["checks"]["memory_ingested"] = True
+                print("HR 成功入库", flush=True)
+                wo2, _ = workorder(
+                    "在 calc.py 将 average 的文档字符串改为：返回列表的算术平均值，空列表结果固定为0.0。这段文字与旧文档不同，请逐字替换文档字符串。保持逻辑与类型注解不变，确保测试通过。参考已确认的平均值任务记录。"
+                )
+                records = request("/wo/" + wo2 + "/records")["items"]
+                assert any(item["kind"] == "hr_retrieve" and item.get("hits") for item in records)
+                assert any(
+                    item["kind"] == "context" and "项目记忆" in json.dumps(item, ensure_ascii=False)
+                    for item in records
+                )
+                request("/wo/" + wo2 + "/cancel", {})
+                report["checks"]["memory_recalled_into_context"] = wo2
+                print("HR 已召回并进入模型上下文", flush=True)
             if args.vision_image:
                 # 使用独立演示目录生成源码，再仅将必要文件复制到本次沙箱。
                 import shutil
 
                 from scripts.prepare_demo import prepare
 
-                demo = Path(prepare(args.vision_image))
+                demo = Path(prepare(args.vision_image, destination=runroot / "visual-template"))
                 for name in ("vision_classify.py", "test_vision_classify.py"):
                     shutil.copyfile(demo / name, project / name)
                 (project / "sample").mkdir()
@@ -177,7 +218,9 @@ def main():
     report["elapsed_sec"] = round(time.time() - report["started"], 2)
     path = runroot / "report.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    print(json.dumps({key: value for key, value in report.items()
+                      if key not in ("code_records", "gates", "doctor")},
+                     ensure_ascii=False, indent=2), flush=True)
     print("报告：", path)
     return 0 if report["ok"] else 1
 

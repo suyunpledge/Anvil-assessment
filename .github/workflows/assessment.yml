@@ -1,0 +1,35 @@
+name: Anvil assessment
+on:
+  push:
+    branches: [assessment, master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-and-package:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install locked offline test dependencies
+        run: |
+          python -m pip install --only-binary=:all: -r deploy/requirements-windows-py312-test.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip check
+      - name: Verify and package
+        run: python scripts/assess.py --output .runtime/ci
+      - name: Upload deployment bundle and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anvil-assessment-${{ github.sha }}
+          path: .runtime/ci/publish/
+          if-no-files-found: error
+          retention-days: 30

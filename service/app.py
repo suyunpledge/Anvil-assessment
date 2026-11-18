@@ -10,7 +10,7 @@
   · 取消是协作式的：包一层适配器，在两个节点之间检查标记。
 
 鉴权口径（2026-09-30 补齐）：
-  · /health / /presets 仍开放（自检脚本需要零门槛）
+  · 仅 /health 开放；/presets 与其他业务读写接口均需令牌
   · 其余读口（/wo 列表、/wo/{id}、/events、/wo/{id}/staged）与所有写口一致要求令牌
   · 扩展侧已支持自动读取令牌文件（extension.js::loadToken），无需手动配置
 
@@ -20,11 +20,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
+import secrets as _secrets
 import sys
 import time
-from typing import Any, Dict, List, Optional, Literal
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Literal, Optional
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -38,9 +41,14 @@ from core.paths import ensure_core_on_path, runtime_path, version  # noqa: E402
 
 ensure_core_on_path()
 
-from runner import (RunnerOpts, RunnerRegistry, STATUS_AWAITING_CONFIRM,  # noqa: E402
-                    STATUS_RUNNING, list_presets)
-from auth import env_token, require_auth  # noqa: E402
+from service.auth import require_auth  # noqa: E402
+from service.runner import (  # noqa: E402
+    STATUS_RUNNING,
+    RegistryBusy,
+    RunnerOpts,
+    RunnerRegistry,
+    list_presets,
+)
 
 # ★ FastAPI 导入放模块顶层：见 gateway/app.py 里同一处的注释（注解字符串化的坑）
 try:
@@ -59,14 +67,9 @@ except Exception:
         return None
 
 
-REGISTRY = RunnerRegistry()
-
 #: ★ 进程级令牌：只生成/读取一次（2026-09-30 实测坑：build_app 被调两次时
 #:   会生成两个不同令牌并两次覆盖文件，先读到旧令牌的一方全部 401）。
 #:   放在模块级，无论 build_app 被调多少次都用同一个。
-import secrets as _secrets
-
-
 def _resolve_token() -> str:
     """进程级只算一次：环境变量优先（LOCAL_IDE_TOKEN，兼容 LOCAL_LLM_TOKEN），否则随机。"""
     v = (os.environ.get("LOCAL_IDE_TOKEN") or "").strip()
@@ -171,7 +174,7 @@ if _FASTAPI_OK:
         workdir: str = ""
         target: str = ""
         test_path: str = ""
-        adapter: str = "qwen3.5"
+        adapter: str = Field(default_factory=lambda: RunnerOpts().adapter)
         model: str = ""
         mode: Literal["dry_run", "execute"] = "dry_run"
         dirs: List[str] = Field(default_factory=list)
@@ -187,11 +190,22 @@ else:
         pass
 
 
-def build_app():
+def build_app(registry: Optional[RunnerRegistry] = None):
     if not _FASTAPI_OK:
         raise SystemExit("未找到 fastapi；请用带 fastapi/uvicorn 的解释器运行（本机 AutoClaw 内嵌 python 自带）")
 
-    app = FastAPI(title="Local IDE Work-Order Service", version="0.3.1")
+    registry = registry if registry is not None else RunnerRegistry()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        registry.open()
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(registry.shutdown)
+
+    app = FastAPI(title="Local IDE Work-Order Service", version="0.3.1", lifespan=lifespan)
+    app.state.registry = registry
 
     # ------------------------------------------------------------------
     # 安全加固（2026-09-28 外部审查 #2 → 2026-09-30 补齐读口）
@@ -205,13 +219,11 @@ def build_app():
 
     # 令牌：进程级（模块加载时已定），这里只负责落盘
     token = _TOKEN
+    app.state.token = token
     _write_token_file(token)
     policy = ConfirmPolicy.from_env()
 
-    # 读口鉴权依赖项（除 /health、/presets 外都套）。
-    # /health 与 /presets 仅返回状态与画像清单，不含用户内容；自检脚本
-    # 需要它们零门槛。其余读口（列表、详情、SSE、暂存）同样会泄露本机路径与
-    # 工单内文——所以 2026-09-30 补齐：不再口头豁免。
+    # 仅健康检查公开；画像、工单与事件统一鉴权。
     READ_AUTH = require_auth(token, what="查询接口")
 
     # 2026-10-05 删除：_write_auth 曾是实现「按策略开关鉴权」的地方，但它从未被任何
@@ -221,7 +233,7 @@ def build_app():
     def health() -> Dict[str, Any]:
         return {"ok": True, "core": version(),
                 "runtime": os.path.dirname(runtime_path("x")),
-                "wos": len(REGISTRY.all()),
+                "wos": len(registry.all()),
                 "policy": policy.summary(),
                 "auth": {"token_required": policy.require_token,
                          "token_file": _token_path()}}
@@ -246,7 +258,25 @@ def build_app():
             return JSONResponse(status_code=403,
                                 content={"error": "该工作目录不在允许范围内（LOCAL_IDE_ALLOWED_ROOTS）",
                                          "allowed": policy.allowed_roots})
-        r = REGISTRY.create(opts)
+        if not os.path.isdir(opts.workdir):
+            return JSONResponse(status_code=400, content={"error": "工作目录不存在"})
+        if opts.kind == "code":
+            from tools import ToolContext, ToolError
+            try:
+                ctx = ToolContext(root=opts.workdir, target=opts.target)
+                if not os.path.isfile(ctx.resolve(opts.target)):
+                    raise ToolError("目标文件不存在")
+                if opts.test_path:
+                    ctx.resolve(opts.test_path)
+            except ToolError as exc:
+                return JSONResponse(status_code=400, content={"error": str(exc)})
+        # 固定建单时的目录，避免后续 chdir 或相对目录造成作用域漂移。
+        opts.workdir = os.path.realpath(opts.workdir)
+        try:
+            r = registry.create(opts)
+        except RegistryBusy as exc:
+            return JSONResponse(status_code=429, content={"error": str(exc)},
+                                headers={"Retry-After": "2"})
         return {"wo_id": r.wo_id, "status": r.status,
                 "require_confirm": opts.require_confirm,
                 "policy": policy.summary()}
@@ -254,12 +284,12 @@ def build_app():
     @app.get("/wo", dependencies=[READ_AUTH])
     def list_wo() -> Dict[str, Any]:
         items = [{"wo_id": r.wo_id, "status": r.status, "kind": r.opts.kind,
-                  "task": r.opts.task[:80]} for r in REGISTRY.all()]
+                  "task": r.opts.task[:80]} for r in registry.all()]
         return {"count": len(items), "items": items}
 
     @app.get("/wo/{wo_id}", dependencies=[READ_AUTH])
     def get_wo(wo_id: str):
-        r = REGISTRY.get(wo_id)
+        r = registry.get(wo_id)
         if not r:
             return JSONResponse(status_code=404, content={"error": "工单不存在"})
         return r.snapshot()
@@ -272,7 +302,7 @@ def build_app():
           属于敏感读口，不能因为“是读接口”就豁免令牌。
         ★ 2026-09-30 改为不返回本地绝对路径，只回文件名。
         """
-        r = REGISTRY.get(wo_id)
+        r = registry.get(wo_id)
         if not r:
             return JSONResponse(status_code=404, content={"error": "工单不存在"})
         real = str(r.result.get("real_path") or "")
@@ -283,14 +313,14 @@ def build_app():
 
     @app.post("/wo/{wo_id}/cancel", dependencies=[READ_AUTH])
     def cancel(wo_id: str):
-        r = REGISTRY.get(wo_id)
+        r = registry.get(wo_id)
         if not r:
             return JSONResponse(status_code=404, content={"error": "工单不存在"})
         return {"ok": r.cancel(), "status": r.status}
 
     @app.post("/wo/{wo_id}/confirm", dependencies=[READ_AUTH])
     def confirm(wo_id: str, req: Optional[ConfirmReq] = None):
-        r = REGISTRY.get(wo_id)
+        r = registry.get(wo_id)
         if not r:
             return JSONResponse(status_code=404, content={"error": "工单不存在"})
         if req is not None and not req.approve:
@@ -299,38 +329,62 @@ def build_app():
         return JSONResponse(status_code=(200 if res.get("ok") else 409), content=res)
 
     @app.get("/wo/{wo_id}/events", dependencies=[READ_AUTH])
-    def events(wo_id: str, once: int = 0) -> Any:
+    def events(wo_id: str, once: int = 0, after: int = 0,
+               last_event_id: str = Header(default="")) -> Any:
         """SSE 事件流。`?once=1` 时只回一次快照（便于脚本化测试）。"""
-        r = REGISTRY.get(wo_id)
+        r = registry.get(wo_id)
         if not r:
             return JSONResponse(status_code=404, content={"error": "工单不存在"})
 
-        def gen():
+        try:
+            cursor_start = int(last_event_id) if last_event_id else after
+            if cursor_start < 0:
+                raise ValueError
+        except ValueError:
+            return JSONResponse(status_code=400, content={"error": "事件游标必须为非负整数"})
+
+        async def gen():
             yield "data: %s\n\n" % json.dumps({"kind": "snapshot", "wo": r.wo_id,
                                                "status": r.status}, ensure_ascii=False)
             if once:
                 yield "event: end\ndata: [DONE]\n\n"
                 return
-            idle = 0.0
+            cursor = cursor_start
+            last_activity = time.monotonic()
+            last_heartbeat = last_activity
             while True:
-                batch = r.drain(timeout=0.5)
+                batch, gap = r.events.read_after(cursor)
+                if gap:
+                    if not batch:
+                        cursor = 0
+                    yield "data: %s\n\n" % json.dumps(
+                        {"kind": "snapshot", "reset": True, **r.snapshot()},
+                        ensure_ascii=False, default=str)
                 if batch:
-                    idle = 0.0
+                    last_activity = time.monotonic()
                     for ev in batch:
-                        yield "data: %s\n\n" % json.dumps(ev, ensure_ascii=False, default=str)
-                else:
-                    idle += 0.5
-                if not r.alive and r.events.empty() and r.status != STATUS_RUNNING:
-                    # 收尾：把剩余事件吐完再结束
-                    for ev in r.drain():
-                        yield "data: %s\n\n" % json.dumps(ev, ensure_ascii=False, default=str)
+                        cursor = ev["seq"]
+                        yield "id: %d\ndata: %s\n\n" % (cursor, json.dumps(ev, ensure_ascii=False, default=str))
+                if r.events.finished or (not r.alive and r.status not in ("pending", STATUS_RUNNING)):
+                    # 收到生产完成通知后再读一轮，覆盖结束检查前刚写入的尾事件。
+                    remaining, _ = r.events.read_after(cursor)
+                    for ev in remaining:
+                        cursor = ev["seq"]
+                        yield "id: %d\ndata: %s\n\n" % (cursor, json.dumps(ev, ensure_ascii=False, default=str))
                     yield "event: end\ndata: [DONE]\n\n"
                     return
-                if idle > 900:          # 单连接最长 15 分钟，防挂死
+                now = time.monotonic()
+                if now - last_activity >= 900:
                     yield "event: timeout\ndata: [DONE]\n\n"
                     return
+                if now - last_heartbeat >= 15:
+                    yield ": heartbeat\n\n"
+                    last_heartbeat = now
+                await r.events.wait_after(
+                    cursor, timeout=min(15 - (now - last_heartbeat), 900 - (now - last_activity)))
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return app
 
