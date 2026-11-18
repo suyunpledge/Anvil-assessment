@@ -94,11 +94,10 @@ ALLOWED_NETS = (
 # ============================================================
 # 鉴权（2026-10-05 补齐）
 # ============================================================
-# 起因：工单服务（service/）自 09-30 起有令牌体系，而**模型唯一出口**的网关却完全
-# 裸奔——/audit、/v1/models、/v1/chat/completions、/ollama/api/chat 任何本机进程
-# 都能随便打。Ollama 本身也没有鉴权，所以威胁模型并没有变差；真正的问题是**不对称**：
-# 一边在加固、另一边留门，而交接文档与扩展代码（它早就写着「/health 是唯一免鉴权
-# 端点」）本来就是按「两个服务同一个口径」理解的。这里把口径补齐。
+# 起因：工单服务（service/）自 09-30 起有令牌体系，而**模型唯一出口**的网关完全
+# 裸奔——/audit、/v1/models、/v1/chat/completions、/ollama/api/chat 本机任何进程
+# 都能直接访问。Ollama 本身没有鉴权，本机进程都能访问；这里把两个服务的鉴权口径
+# 统一，避免一边加固、一边留门。
 #
 # 令牌来源（任一命中即可，方便两个服务共用同一个令牌）：
 #   · 环境变量 LOCAL_IDE_TOKEN / LOCAL_LLM_TOKEN
@@ -387,8 +386,8 @@ def ollama_to_openai(resp: Dict[str, Any], model: str) -> Dict[str, Any]:
 # ============================================================
 def build_app(token: Optional[str] = None):
     if not _FASTAPI_OK:
-        raise SystemExit("未找到 fastapi；请用带 fastapi/uvicorn 的解释器运行"
-                         "（本机 AutoClaw 内嵌 python 自带）")
+        raise SystemExit("未找到 fastapi；请先安装 fastapi 和 uvicorn"
+                         "（或运行 deploy/bootstrap.ps1 自动安装）")
 
     app = FastAPI(title="Local Model Gateway", version="0.2.1")
     PROFILES = load_profiles()

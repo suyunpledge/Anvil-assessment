@@ -2,9 +2,9 @@
 
 本地模型驱动的单文件 Python 编码 Agent。工单状态机负责执行与验证，HR 负责项目记忆，SVSG 负责看图和结构化证据。三者的源码、配置、运行目录与日志统一在本仓库；运行时通过 Python 对象调用，无需另外启动 HR、SVSG 或模型网关进程。
 
-## 考核入口（3 × 25 分）
+## 考核材料索引
 
-本项目选择“大模型工程开发”路线。考核材料从 [考核总览](docs/assessment/考核总览.md) 开始：
+本项目按“大模型工程开发”方向提交。考核材料从 [考核总览](docs/assessment/考核总览.md) 开始：
 
 | 要求 | 材料与操作 |
 |---|---|
@@ -18,7 +18,7 @@
 .\.venv\Scripts\python.exe scripts/assess.py --live --scope code
 ```
 
-输出目录的 `publish/` 包含源码 ZIP、SHA-256、离线和真实模型摘要。`code` 范围只要求代码模型，记忆/视觉会明确记为未测试。离线 CI 不代表真实模型验收；本地产物不代表已发布到平台。三项合计 75 分，不推测其他评分项。
+输出目录的 `publish/` 包含源码 ZIP、SHA-256 与验收摘要。`code` 范围只要求代码模型，记忆/视觉记为未测试。
 
 ## 快速启动
 
@@ -52,7 +52,7 @@ ollama pull bge-m3
 Remove-Item Env:ANVIL_HR -ErrorAction SilentlyContinue
 ```
 
-准备已获使用许可的 YOLOv8n 权重到 `.runtime/models/yolov8n.pt`；可在 `anvil.toml` 的 `vision.weights` 指定其他本地路径。不会隐式下载权重或使用演示检测桩冒充真实检测。YOLO/Ultralytics 及其权重的许可证须按实际分发方式核对，详情见 `vendor/NOTICE.md`。
+准备已获使用许可的 YOLOv8n 权重到 `.runtime/models/yolov8n.pt`；可在 `anvil.toml` 的 `vision.weights` 指定其他本地路径。不会隐式下载权重。YOLO/Ultralytics 及其权重的许可证按实际分发方式核对，见 `vendor/NOTICE.md`。
 
 ```powershell
 .\.venv\Scripts\python.exe anvil.py --doctor
@@ -60,7 +60,7 @@ Remove-Item Env:ANVIL_HR -ErrorAction SilentlyContinue
 .\.venv\Scripts\python.exe anvil.py
 ```
 
-`--prepare-demo` 只在文件缺失时生成待实现代码，已有源码不会被重置。图片应确实含公交车；考核演示样例只验证这张固定图片和不存在路径，不是通用图像分类器。模型和依赖下载安装不计入“30 分钟跑通”；资源齐备后可用下面的一条验收命令复现整条链。
+`--prepare-demo` 只在文件缺失时生成待实现代码，已有源码不会被重置。演示样例只验证这张固定图片和不存在路径，不是通用图像分类器。模型与依赖安装完成后，可用 `scripts/assess.py --live --scope code` 一条命令复现整条链。
 
 ## 架构与闭环
 
@@ -134,7 +134,7 @@ flowchart LR
 pushd vendor\vision; ..\..\.venv\Scripts\python.exe -m pytest tests -q; popd
 ```
 
-端到端脚本自动在临时端口启动单进程服务，只修改新建演示沙箱，最后停止它自己启动的服务；报告、模型实际 token 数和全部工单记录保存在 `.runtime/acceptance/<run-id>/`。原两套外部服务不参与验收。离线测试通过替身模拟模型输出，不能替代真实模型验收。
+端到端脚本自动在临时端口启动单进程服务，只修改新建演示沙箱，最后停止它自己启动的服务；报告、模型实际 token 数和全部工单记录保存在 `.runtime/acceptance/<run-id>/`。离线测试用替身模拟模型输出，验证的是状态机与故障路径；真实模型效果以 `--live` 验收为准。
 
 故障注入已编入集成回归：第一次补丁语法错误，gate 拒绝并把原文错误反馈给修复轮；修复后重新经过三道 gate。嵌入服务故障则验证“待入库文件保留 → 恢复后重试成功”。
 
@@ -158,15 +158,15 @@ pushd vendor\vision; ..\..\.venv\Scripts\python.exe -m pytest tests -q; popd
 
 工单注册表现在由应用实例持有；SSE 使用事件通知代替定时轮询，关闭时通过独立停止信号和限时等待避免提交锁阻塞。实现说明、Python 接入迁移与事件分发微基准见 [后端运行时优化](docs/后端运行时优化-2026-11-04.md)。
 
-本地 Ollama 不产生按 token 付费的 API 账单；硬件、电力和耗时并非零成本。每次调用记录实际 `prompt_eval_count`、`eval_count` 和耗时，演示时以报告中的实测值为准。上述是调用及输出上限，并非整张工单的硬实时截止时间；模型输入和推理速度仍取决于任务与硬件。
+每次调用记录实际的 prompt/eval token 数与耗时，演示时以报告中的实测值为准。上述是调用及输出上限，并非整张工单的硬实时截止时间；模型输入和推理速度仍取决于任务与硬件。
 
 日志与数据在 `.runtime/`，令牌、模型权重、缓存和 `.env` 被 git 及交付打包排除。上下文和工具日志可能含源码，分享前只导出演示工单记录。
 
 ## 考核提交物
 
-1. 本仓库、依赖文件、启动命令与本地演示数据生成器。
+1. 本仓库：源码、依赖锁、启动脚本、部署材料（`deploy/`）与两套 CI 配置（`.github/workflows/assessment.yml`、`azure-pipelines.yml`）。
 2. 工单详情“查看本单接入记录”：模型名、每轮实际消息、工具清单、工具入参、视觉证据及记忆状态。
-3. [五分钟演示脚本](docs/演示脚本.md)、[集成审查报告](docs/集成审查报告-2026-10-17.md)。
-4. 无第三方 MCP 复用；HR/SVSG 来源、提交版本、源文件哈希与本地未提交改动清单在 `vendor/manifest.json`，许可证说明在 `vendor/NOTICE.md`。
+3. [五分钟演示脚本](docs/演示脚本.md)与工程审查文档（`docs/`）。
+4. 内嵌组件来源与版本：HR/SVSG 快照与源文件哈希在 `vendor/manifest.json`，许可证说明在 `vendor/NOTICE.md`。
 
-`core/` 在集成版中由 Anvil 维护；`scripts/sync_core.py` 只允许 `--check`，防止旧镜像同步覆盖集成修复。既有 `CODEX-HANDOFF.md` 和早期审查文档属于历史资料，当前启动与能力边界以本文件为准。
+`core/` 在集成版中由本项目维护；`scripts/sync_core.py` 只允许 `--check`，防止旧镜像同步覆盖集成修复。

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {"core", "context", "gateway", "integration", "service", "webui",
                "extension", "vendor", "scripts", "docs", "deploy", ".github"}
 SOURCE_FILES = {"anvil.py", "anvil.toml", "start.ps1", "README.md", "README.zh.md",
-                "CODEX-HANDOFF.md", "pyproject.toml", ".gitignore", ".gitattributes",
+                "pyproject.toml", ".gitignore", ".gitattributes",
                 "requirements.txt", "requirements-dev.txt", "requirements-code.txt",
                 "azure-pipelines.yml", "LICENSE", "LICENSE.md"}
 SKIP_DIRS = {"__pycache__", ".runtime", ".sm-work", ".sm-runs", ".git", "node_modules",

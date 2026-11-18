@@ -47,7 +47,7 @@ def runtime_path(*parts: str) -> str:
 
 
 def version() -> dict:
-    """读快照版本（core/VENDOR.md 里的字段），用于自检与交接说明。"""
+    """读快照版本（core/VENDOR.md 里的字段），用于自检。"""
     md = os.path.join(ROOT, "core", "VENDOR.md")
     info = {"vendor": "unknown", "synced_at": "unknown"}
     try:
