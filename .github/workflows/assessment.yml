@@ -1,7 +1,7 @@
 name: Anvil assessment
 on:
   push:
-    branches: [assessment, master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
