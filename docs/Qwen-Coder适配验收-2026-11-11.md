@@ -35,7 +35,7 @@ Ollama `/api/ps` 报告本次模型上下文为 8192，`size_vram` 为 4,994,472
 
 本机未安装配置中的 `qwen2.5vl:7b` 和 `bge-m3:latest`。因此代码模型资源就绪，但全能力诊断 `ok` 仍为 false；本次真实验收关闭了 HR，未验证视觉或记忆入库，不更换嵌入维度或现有记忆数据。
 
-## 前端交接
+## 前端接入
 
 AnvilIDE 的 `src/renderer/src/anvilpanel.ts:166` 仍写死“代码 qwen3.5 / 视觉 qwen2.5vl / 记忆 bge-m3 就绪”，且不可用项目前只加文字标记。按用户要求留给 Claude 修改：状态文案应读取 integrations.models 与 code_ready，各能力分别判断；不可用选项可根据 bad 禁用。旧文案不代表后端实际仍使用 Qwen3.5。
 

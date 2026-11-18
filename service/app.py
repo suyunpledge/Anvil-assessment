@@ -192,7 +192,7 @@ else:
 
 def build_app(registry: Optional[RunnerRegistry] = None):
     if not _FASTAPI_OK:
-        raise SystemExit("未找到 fastapi；请用带 fastapi/uvicorn 的解释器运行（本机 AutoClaw 内嵌 python 自带）")
+        raise SystemExit("未找到 fastapi；请先安装 fastapi 和 uvicorn（或运行 deploy/bootstrap.ps1 自动安装）")
 
     registry = registry if registry is not None else RunnerRegistry()
 
